@@ -17,7 +17,12 @@ def validate_routes(
     providers: dict[str, Provider],
     aliases: dict[str, str] | None = None,
 ) -> list[str]:
-    """每条路由目标的 provider 必须已注册。返回问题列表(空=通过)。"""
+    """**routes** 的每个目标 provider 必须已注册(返回问题列表,空=通过)。
+
+    **aliases 是可选项,不在此 fail**:共享配置常列出多家别名,而某消费者只持部分 provider 的
+    key——别名引用未注册 provider 只代表"此处不可用",请求到它时才在调用层报错,而非启动崩溃。
+    `aliases` 参数保留仅为签名兼容(忽略)。
+    """
     problems: list[str] = []
     for logical, targets in routes.items():
         for spec in targets:
@@ -30,16 +35,6 @@ def validate_routes(
                 problems.append(
                     f"route {logical!r} → {spec!r}: provider {target.provider!r} 未注册"
                 )
-    for model, spec in (aliases or {}).items():
-        try:
-            target = Target.parse(spec)
-        except ValueError as exc:
-            problems.append(f"alias {model!r}: {exc}")
-            continue
-        if target.provider not in providers:
-            problems.append(
-                f"alias {model!r} → {spec!r}: provider {target.provider!r} 未注册"
-            )
     return problems
 
 

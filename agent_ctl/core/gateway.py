@@ -52,10 +52,12 @@ class Gateway:
         self._cache_ttl_s = cache_ttl_s
         self._cache_tool_responses = cache_tool_responses
 
-        # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError
+        # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError。
+        # 只校验 routes(必经);aliases 是可选项(共享配置里可能含本消费者没 key 的 provider),
+        # 留到调用时再校验,故不在此 fail。
         missing = {
             t.provider
-            for t in self._router.all_targets()
+            for t in self._router.route_targets()
             if t.provider not in self._providers
         }
         if missing:

@@ -23,10 +23,13 @@ class Router:
             return [Target.parse(model)]
         raise KeyError(f"unknown model: {model!r} (not in routes/aliases, no '/')")
 
-    def all_targets(self) -> list[Target]:
-        """所有 routes + aliases 里的 Target(不含 '/'-直连,那种运行时才知)。"""
+    def route_targets(self) -> list[Target]:
+        """仅 routes 里的 Target(必经路由,启动期需保证 provider 已注册)。"""
         result: list[Target] = []
         for targets in self._routes.values():
             result.extend(targets)
-        result.extend(self._aliases.values())
         return result
+
+    def all_targets(self) -> list[Target]:
+        """routes + aliases 里的 Target(aliases 是可选项,可能引用本消费者没 key 的 provider)。"""
+        return [*self.route_targets(), *self._aliases.values()]

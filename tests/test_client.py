@@ -27,13 +27,28 @@ def test_from_config_rejects_unregistered_provider(tmp_path):
         GatewayClient.from_config(cfg, providers={"fake": FakeProvider(["ok"])})
 
 
-def test_from_config_rejects_unregistered_alias_provider(tmp_path):
+def test_alias_to_unregistered_provider_is_lenient(tmp_path):
+    """共享配置常含本消费者没 key 的别名 → 装配不应崩;请求到该别名时才在调用层报错。"""
     import pytest
 
+    from agent_ctl.errors import GatewayError
+
     cfg = Config(
-        routes={"default": ["fake/m"]},
-        model_aliases={"gpt": "openai/gpt"},
+        routes={"default": ["fake/m"]},  # 必经路由有效
+        model_aliases={
+            "gpt": "openai/gpt"
+        },  # 别名指向未注册 provider —— 可选,不该 fail
+        cache_enabled=False,
         db_path=str(tmp_path / "c.db"),
+        retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=1.0),
     )
-    with pytest.raises(ValueError, match="alias 'gpt'"):
-        GatewayClient.from_config(cfg, providers={"fake": FakeProvider(["ok"])})
+    # 装配通过(别名宽松)
+    client = GatewayClient.from_config(cfg, providers={"fake": FakeProvider(["ok"])})
+    # 用有效路由仍正常
+    assert (
+        client.messages("default", [{"role": "user", "content": "hi"}]).text
+        == "fake-ok"
+    )
+    # 但真去请求那个未注册别名 → 调用层报 GatewayError
+    with pytest.raises(GatewayError, match="openai"):
+        client.messages("gpt", [{"role": "user", "content": "hi"}])
