@@ -91,6 +91,62 @@ def openai_message_to_anthropic_content(message: Any) -> list[dict]:
     return blocks
 
 
+def anthropic_messages_to_openai(messages: list[dict]) -> list[dict]:
+    """多轮工具循环的消息翻译:Anthropic 形 messages → OpenAI 形。
+
+    - content 为 str:原样透传。
+    - assistant 的 content 块:text → content 字符串;tool_use → OpenAI tool_calls。
+    - user 的 content 块:tool_result → 独立的 {role:tool, tool_call_id, content} 消息;text → user 文本。
+
+    使工具调用型 agent 的**多步循环**(把工具结果发回模型)也能在 OpenAI 家族 provider 上跑。
+    """
+    out: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append({"role": role, "content": content})
+            continue
+        if role == "assistant":
+            text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            tool_calls = [
+                {
+                    "id": b.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": b.get("name", ""),
+                        "arguments": json.dumps(b.get("input", {}), ensure_ascii=False),
+                    },
+                }
+                for b in content
+                if b.get("type") == "tool_use"
+            ]
+            msg: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            out.append(msg)
+        else:
+            # user/tool:tool_result 拆成 role=tool 消息;其余文本并成 user 消息。
+            text_parts = []
+            for b in content:
+                if b.get("type") == "tool_result":
+                    tc = b.get("content")
+                    out.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": b.get("tool_use_id", ""),
+                            "content": tc
+                            if isinstance(tc, str)
+                            else json.dumps(tc, ensure_ascii=False),
+                        }
+                    )
+                elif b.get("type") == "text":
+                    text_parts.append(b.get("text", ""))
+            if text_parts:
+                out.append({"role": "user", "content": "".join(text_parts)})
+    return out
+
+
 def openai_response_to_anthropic_raw(choice: Any, usage: Any) -> dict:
     """组装 Anthropic 风格 raw(content + stop_reason + usage),供 ops-agent shim 直接还原。"""
     return {

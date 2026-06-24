@@ -4,6 +4,7 @@ from __future__ import annotations
 from agent_ctl.errors import RetriableError, TerminalError
 from agent_ctl.models import NormalizedRequest, NormalizedResponse, Target
 from agent_ctl.providers.tooltrans import (
+    anthropic_messages_to_openai,
     anthropic_tool_choice_to_openai,
     anthropic_tools_to_openai,
     openai_response_to_anthropic_raw,
@@ -34,9 +35,9 @@ class OpenAIProvider:
     def invoke(
         self, target: Target, request: NormalizedRequest, timeout: float
     ) -> NormalizedResponse:
-        # OpenAI 把 system 当作 messages 里的一条 role=system(Anthropic 是独立 system 参数),
-        # 故在此把 NormalizedRequest.system 规整为首条 system 消息。
-        messages = list(request.messages)
+        # 消息:Anthropic 形(多轮工具循环含 tool_use/tool_result 块)→ OpenAI 形。
+        # system 是独立字段,规整为首条 role=system 消息。
+        messages = anthropic_messages_to_openai(request.messages)
         if request.system is not None:
             messages = [{"role": "system", "content": request.system}, *messages]
         kwargs = {

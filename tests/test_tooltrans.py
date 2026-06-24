@@ -1,11 +1,45 @@
 from types import SimpleNamespace
 
 from agent_ctl.providers.tooltrans import (
+    anthropic_messages_to_openai,
     anthropic_tool_choice_to_openai,
     anthropic_tools_to_openai,
     openai_message_to_anthropic_content,
     openai_response_to_anthropic_raw,
 )
+
+
+def test_multiturn_messages_anthropic_to_openai():
+    """多轮工具循环:assistant tool_use → tool_calls;user tool_result → role=tool 消息。"""
+    msgs = [
+        {"role": "user", "content": "查一下 PG 状态"},  # 纯字符串透传
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "我来查"},
+                {
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "query_pg",
+                    "input": {"sql": "SELECT 1"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "ok 1 row"}
+            ],
+        },
+    ]
+    out = anthropic_messages_to_openai(msgs)
+    assert out[0] == {"role": "user", "content": "查一下 PG 状态"}
+    # assistant 带 tool_calls
+    assert out[1]["role"] == "assistant"
+    assert out[1]["tool_calls"][0]["function"]["name"] == "query_pg"
+    assert '"sql"' in out[1]["tool_calls"][0]["function"]["arguments"]
+    # tool_result → role=tool,带 tool_call_id
+    assert out[2] == {"role": "tool", "tool_call_id": "tu_1", "content": "ok 1 row"}
 
 
 def test_anthropic_tools_to_openai():
