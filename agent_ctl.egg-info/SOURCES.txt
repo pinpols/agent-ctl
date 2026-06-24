@@ -44,5 +44,4 @@ tests/test_openai_provider.py
 tests/test_redaction.py
 tests/test_router.py
 tests/test_server.py
-tests/test_server_skeleton.py
 tests/test_sqlite_store.py

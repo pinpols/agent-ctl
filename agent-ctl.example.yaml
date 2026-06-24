@@ -1,5 +1,14 @@
 routes:
   default: [anthropic/claude-opus-4-8, anthropic/claude-sonnet-4-6]
+# 裸模型名 → provider/model:OpenAI 兼容 server 收到这些 model 名时路由到对应 provider。
+# 客户端只发熟悉的模型名即可;含 "/" 的会被当 provider/model 直连(无需在此登记)。
+model_aliases:
+  claude-opus-4-8: anthropic/claude-opus-4-8
+  claude-sonnet-4-6: anthropic/claude-sonnet-4-6
+  gpt-4o: openai/gpt-4o
+  deepseek-chat: deepseek/deepseek-chat
+  qwen-max: qwen/qwen-max
+  glm-4: glm/glm-4
 prices:                 # [input_per_1M_usd, output_per_1M_usd]
   claude-opus-4-8: [5.0, 25.0]
   claude-sonnet-4-6: [3.0, 15.0]
