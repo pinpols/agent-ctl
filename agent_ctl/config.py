@@ -19,14 +19,14 @@ class Config(BaseModel):
     cache_enabled: bool = True
     cache_ttl_s: int = 600
     profile: str = "dev"
-    db_path: str = ".agentctl/capture.db"
+    db_path: str = ".agent_ctl/capture.db"
     retry: RetryConfig = RetryConfig()
 
 
 def load_config(path: str | None = None) -> Config:
-    """从 yaml 读配置;path 为 None 时尝试 ./agentctl.yaml,无则用默认。env 不覆盖结构,仅 profile。"""
+    """从 yaml 读配置;path 为 None 时尝试 ./agent_ctl.yaml,无则用默认。env 不覆盖结构,仅 profile。"""
     data: dict = {}
-    candidate = path or ("agentctl.yaml" if Path("agentctl.yaml").exists() else None)
+    candidate = path or ("agent_ctl.yaml" if Path("agent_ctl.yaml").exists() else None)
     if candidate:
         with open(candidate, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}

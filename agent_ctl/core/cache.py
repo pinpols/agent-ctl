@@ -1,4 +1,4 @@
-# agentctl/core/cache.py
+# agent_ctl/core/cache.py
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Protocol
 
-from agentctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.models import NormalizedRequest, NormalizedResponse
 
 
 def make_key(request: NormalizedRequest) -> str:

@@ -1,7 +1,7 @@
 # tests/test_client.py
-from agentctl.client.gateway_client import GatewayClient
-from agentctl.config import Config, RetryConfig
-from agentctl.providers.fake import FakeProvider
+from agent_ctl.client.gateway_client import GatewayClient
+from agent_ctl.config import Config, RetryConfig
+from agent_ctl.providers.fake import FakeProvider
 
 
 def test_client_messages_routes_and_returns(tmp_path):

@@ -1,31 +1,31 @@
-# agentctl/core/gateway.py
+# agent_ctl/core/gateway.py
 from __future__ import annotations
 
 import logging
 import time
 import uuid
 
-from agentctl.config import RetryConfig
-from agentctl.core.cache import make_key
-from agentctl.core.cost import CostMeter
-from agentctl.core.router import Router
-from agentctl.errors import (
+from agent_ctl.config import RetryConfig
+from agent_ctl.core.cache import make_key
+from agent_ctl.core.cost import CostMeter
+from agent_ctl.core.router import Router
+from agent_ctl.errors import (
     AllTargetsFailed,
     GatewayError,
     RetriableError,
     TerminalError,
 )
-from agentctl.models import (
+from agent_ctl.models import (
     Attempt,
     CallRecord,
     NormalizedRequest,
     NormalizedResponse,
     Target,
 )
-from agentctl.providers.base import Provider
-from agentctl.store.redaction import redact, redact_messages
+from agent_ctl.providers.base import Provider
+from agent_ctl.store.redaction import redact, redact_messages
 
-log = logging.getLogger("agentctl.gateway")
+log = logging.getLogger("agent_ctl.gateway")
 
 
 class Gateway:

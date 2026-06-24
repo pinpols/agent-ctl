@@ -1,6 +1,6 @@
 # tests/test_sqlite_store.py
-from agentctl.models import CallRecord
-from agentctl.store.sqlite_store import SqliteCaptureStore
+from agent_ctl.models import CallRecord
+from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 
 def _rec(cid, cost):

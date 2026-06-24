@@ -1,7 +1,7 @@
-from agentctl.cli import main
-from agentctl.config import Config
-from agentctl.store.sqlite_store import SqliteCaptureStore
-from agentctl.models import CallRecord
+from agent_ctl.cli import main
+from agent_ctl.config import Config
+from agent_ctl.store.sqlite_store import SqliteCaptureStore
+from agent_ctl.models import CallRecord
 
 
 def test_cost_command_reports(tmp_path, capsys, monkeypatch):
@@ -17,7 +17,7 @@ def test_cost_command_reports(tmp_path, capsys, monkeypatch):
         )
     )
     monkeypatch.setattr(
-        "agentctl.cli.load_config", lambda path=None: Config(db_path=db)
+        "agent_ctl.cli.load_config", lambda path=None: Config(db_path=db)
     )
     rc = main(["cost"])
     out = capsys.readouterr().out
@@ -28,7 +28,7 @@ def test_cost_command_reports(tmp_path, capsys, monkeypatch):
 
 def test_doctor_flags_empty_routes(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(
-        "agentctl.cli.load_config",
+        "agent_ctl.cli.load_config",
         lambda path=None: Config(routes={}, db_path=str(tmp_path / "c.db")),
     )
     rc = main(["doctor"])
@@ -39,7 +39,7 @@ def test_doctor_flags_empty_routes(tmp_path, capsys, monkeypatch):
 
 def test_doctor_flags_unknown_provider(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(
-        "agentctl.cli.load_config",
+        "agent_ctl.cli.load_config",
         lambda path=None: Config(
             routes={"default": ["openai/gpt"]}, db_path=str(tmp_path / "c.db")
         ),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agentctl.models import NormalizedRequest, NormalizedResponse, Target
+from agent_ctl.models import NormalizedRequest, NormalizedResponse, Target
 
 
 class Provider(Protocol):

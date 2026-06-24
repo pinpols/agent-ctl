@@ -1,14 +1,14 @@
 # tests/test_gateway_invoke.py
 import pytest
-from agentctl.core.gateway import Gateway
-from agentctl.core.router import Router
-from agentctl.core.cost import CostMeter
-from agentctl.core.cache import MemoryCache
-from agentctl.config import RetryConfig
-from agentctl.providers.fake import FakeProvider
-from agentctl.store.sqlite_store import SqliteCaptureStore
-from agentctl.models import NormalizedRequest
-from agentctl.errors import AllTargetsFailed, GatewayError
+from agent_ctl.core.gateway import Gateway
+from agent_ctl.core.router import Router
+from agent_ctl.core.cost import CostMeter
+from agent_ctl.core.cache import MemoryCache
+from agent_ctl.config import RetryConfig
+from agent_ctl.providers.fake import FakeProvider
+from agent_ctl.store.sqlite_store import SqliteCaptureStore
+from agent_ctl.models import NormalizedRequest
+from agent_ctl.errors import AllTargetsFailed, GatewayError
 
 REQ = NormalizedRequest(
     model="default",

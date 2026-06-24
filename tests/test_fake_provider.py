@@ -1,7 +1,7 @@
 import pytest
-from agentctl.models import Target, NormalizedRequest
-from agentctl.providers.fake import FakeProvider
-from agentctl.errors import RetriableError, TerminalError
+from agent_ctl.models import Target, NormalizedRequest
+from agent_ctl.providers.fake import FakeProvider
+from agent_ctl.errors import RetriableError, TerminalError
 
 REQ = NormalizedRequest(model="default", messages=[{"role": "user", "content": "hi"}])
 T = Target(provider="fake", model="m")

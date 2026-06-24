@@ -1,0 +1,2 @@
+[console_scripts]
+agent-ctl = agent_ctl.cli:main

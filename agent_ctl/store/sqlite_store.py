@@ -1,4 +1,4 @@
-# agentctl/store/sqlite_store.py
+# agent_ctl/store/sqlite_store.py
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from agentctl.models import CallRecord
+from agent_ctl.models import CallRecord
 
 
 class SqliteCaptureStore:

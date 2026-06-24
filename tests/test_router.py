@@ -1,5 +1,5 @@
 import pytest
-from agentctl.core.router import Router
+from agent_ctl.core.router import Router
 
 
 def test_resolve_returns_ordered_targets():

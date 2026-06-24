@@ -1,6 +1,6 @@
 # tests/test_models.py
-from agentctl.models import Target, CallRecord, Attempt
-from agentctl.errors import RetriableError, TerminalError, GatewayError
+from agent_ctl.models import Target, CallRecord, Attempt
+from agent_ctl.errors import RetriableError, TerminalError, GatewayError
 
 
 def test_target_parse_and_name():

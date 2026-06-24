@@ -1,12 +1,12 @@
 # tests/test_gateway_retry.py
 import pytest
-from agentctl.core.gateway import Gateway
-from agentctl.core.router import Router
-from agentctl.core.cost import CostMeter
-from agentctl.config import RetryConfig
-from agentctl.providers.fake import FakeProvider
-from agentctl.models import Target, NormalizedRequest
-from agentctl.errors import RetriableError, TerminalError
+from agent_ctl.core.gateway import Gateway
+from agent_ctl.core.router import Router
+from agent_ctl.core.cost import CostMeter
+from agent_ctl.config import RetryConfig
+from agent_ctl.providers.fake import FakeProvider
+from agent_ctl.models import Target, NormalizedRequest
+from agent_ctl.errors import RetriableError, TerminalError
 
 REQ = NormalizedRequest(model="default", messages=[{"role": "user", "content": "hi"}])
 T = Target(provider="fake", model="m")

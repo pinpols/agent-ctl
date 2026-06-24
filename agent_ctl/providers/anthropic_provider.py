@@ -1,8 +1,8 @@
-# agentctl/providers/anthropic_provider.py
+# agent_ctl/providers/anthropic_provider.py
 from __future__ import annotations
 
-from agentctl.errors import RetriableError, TerminalError
-from agentctl.models import NormalizedRequest, NormalizedResponse, Target
+from agent_ctl.errors import RetriableError, TerminalError
+from agent_ctl.models import NormalizedRequest, NormalizedResponse, Target
 
 
 def classify_status(status: int) -> str:

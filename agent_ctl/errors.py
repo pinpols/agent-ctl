@@ -1,4 +1,4 @@
-# agentctl/errors.py
+# agent_ctl/errors.py
 class GatewayError(Exception):
     """网关层基异常。"""
 

@@ -1,4 +1,4 @@
-# agentctl/models.py
+# agent_ctl/models.py
 from __future__ import annotations
 
 from pydantic import BaseModel

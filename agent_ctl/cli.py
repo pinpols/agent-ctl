@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 
-from agentctl.config import load_config
-from agentctl.models import Target
-from agentctl.store.sqlite_store import SqliteCaptureStore
+from agent_ctl.config import load_config
+from agent_ctl.models import Target
+from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
-# KNOWN_PROVIDERS 是静态 lint 集合:仅列举 agentctl 当前随包附带内建适配器的 provider 名。
+# KNOWN_PROVIDERS 是静态 lint 集合:仅列举 agent_ctl 当前随包附带内建适配器的 provider 名。
 # 它不是运行时接线检查——运行时权威校验由 GatewayClient.from_config 中的
 # validate_routes 负责。doctor 命令使用此集合给出"无内建适配器"的早期提示。
 KNOWN_PROVIDERS = {"anthropic"}  # 本期内建;新增 provider 时同步扩充
@@ -59,7 +59,7 @@ _COMMANDS = {"captures": _cmd_captures, "cost": _cmd_cost, "doctor": _cmd_doctor
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agentctl")
+    parser = argparse.ArgumentParser(prog="agent-ctl")
     parser.add_argument("--config", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
     p_cap = sub.add_parser("captures")

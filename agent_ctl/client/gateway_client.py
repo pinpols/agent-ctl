@@ -1,15 +1,15 @@
-# agentctl/client/gateway_client.py
+# agent_ctl/client/gateway_client.py
 from __future__ import annotations
 
-from agentctl.config import Config
-from agentctl.core.cache import MemoryCache
-from agentctl.core.cost import CostMeter
-from agentctl.core.gateway import Gateway
-from agentctl.core.router import Router
-from agentctl.models import NormalizedRequest, NormalizedResponse
-from agentctl.models import Target
-from agentctl.providers.base import Provider
-from agentctl.store.sqlite_store import SqliteCaptureStore
+from agent_ctl.config import Config
+from agent_ctl.core.cache import MemoryCache
+from agent_ctl.core.cost import CostMeter
+from agent_ctl.core.gateway import Gateway
+from agent_ctl.core.router import Router
+from agent_ctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.models import Target
+from agent_ctl.providers.base import Provider
+from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 
 def validate_routes(

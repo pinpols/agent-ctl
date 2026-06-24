@@ -1,8 +1,8 @@
 import pytest
 
-from agentctl.errors import RetriableError, TerminalError
-from agentctl.providers.anthropic_provider import AnthropicProvider, classify_status
-from agentctl.models import Target, NormalizedRequest
+from agent_ctl.errors import RetriableError, TerminalError
+from agent_ctl.providers.anthropic_provider import AnthropicProvider, classify_status
+from agent_ctl.models import Target, NormalizedRequest
 
 REQ = NormalizedRequest(
     model="default", messages=[{"role": "user", "content": "hi"}], max_tokens=64

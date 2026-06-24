@@ -1,4 +1,4 @@
-from agentctl.store.redaction import redact, redact_messages
+from agent_ctl.store.redaction import redact, redact_messages
 
 
 def test_redact_token_and_email():

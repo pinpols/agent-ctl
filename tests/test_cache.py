@@ -1,6 +1,6 @@
 # tests/test_cache.py
-from agentctl.models import NormalizedRequest, NormalizedResponse
-from agentctl.core.cache import make_key, MemoryCache
+from agent_ctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.core.cache import make_key, MemoryCache
 
 REQ = NormalizedRequest(model="default", messages=[{"role": "user", "content": "hi"}])
 
@@ -63,7 +63,7 @@ def test_cache_get_set_and_miss():
 
 
 def test_cache_expiry(monkeypatch):
-    import agentctl.core.cache as mod
+    import agent_ctl.core.cache as mod
 
     now = {"t": 1000.0}
     monkeypatch.setattr(mod.time, "monotonic", lambda: now["t"])

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentctl.models import Target
+from agent_ctl.models import Target
 
 
 class Router:

@@ -1,8 +1,8 @@
-from agentctl.config import load_config
+from agent_ctl.config import load_config
 
 
 def test_load_config_from_yaml(tmp_path):
-    cfg_file = tmp_path / "agentctl.yaml"
+    cfg_file = tmp_path / "agent_ctl.yaml"
     cfg_file.write_text(
         "routes:\n"
         "  default: [anthropic/claude-opus-4-8, anthropic/claude-sonnet-4-6]\n"

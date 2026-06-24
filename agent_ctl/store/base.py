@@ -1,9 +1,9 @@
-# agentctl/store/base.py
+# agent_ctl/store/base.py
 from __future__ import annotations
 
 from typing import Protocol
 
-from agentctl.models import CallRecord
+from agent_ctl.models import CallRecord
 
 
 class CaptureStore(Protocol):

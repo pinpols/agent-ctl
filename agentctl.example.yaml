@@ -6,7 +6,7 @@ prices:                 # [input_per_1M_usd, output_per_1M_usd]
 cache_enabled: true
 cache_ttl_s: 600
 profile: dev
-db_path: .agentctl/capture.db
+db_path: .agent_ctl/capture.db
 retry:
   max_attempts_per_target: 2
   base_backoff_s: 0.2

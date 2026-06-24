@@ -1,4 +1,4 @@
-from agentctl.core.cost import CostMeter
+from agent_ctl.core.cost import CostMeter
 
 
 def test_cost_known_model():

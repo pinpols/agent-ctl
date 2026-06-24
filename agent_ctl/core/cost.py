@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-log = logging.getLogger("agentctl.cost")
+log = logging.getLogger("agent_ctl.cost")
 
 
 class CostMeter:
