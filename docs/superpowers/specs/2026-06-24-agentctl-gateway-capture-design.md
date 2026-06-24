@@ -39,6 +39,10 @@
 - ❌ 限流 → v2(第一刀聚焦 路由/回退/成本/缓存/捕获)
 - ❌ 多租户 / 鉴权 / 分布式部署(单机、单用户 showcase 起步)
 - ❌ 语义缓存(拉进 embedding 会与 vecstream 重叠)→ v2
+- ❌ **流式(streaming)→ v2**:v1 只做非流式(`messages.create`)。理由:流式下的"全量捕获 + 成本核算 + 缓存键"都要在 chunk 聚合后才能算,复杂度高;先把治理骨架在非流式上做扎实。ops-agent 现有诊断/eval 路径均非流式,够用。流式接入缝在 `Provider` 协议上预留(future:`invoke_stream`)。
+
+### 边界澄清:网关 = 单次调用治理,不是 agent 循环
+网关的一个 `invoke` = **一次模型调用**。agent 的多步规划/工具调用循环仍留在消费者侧(ops-agent),网关只逐次治理 + 捕获每一跳。`CallRecord.tool_calls` 只记"这次响应里有几个 tool_use 块",不替 agent 跑工具、不串联多步。
 
 ## 3. 架构与接入形态
 
@@ -77,7 +81,7 @@ agentctl/
 | 请求 | `model_requested` `params` `messages_redacted` `prompt_version` | 逻辑模型名、温度/max_tokens/有无工具、脱敏输入、**prompt 版本(预留)** |
 | 路由 | `model_resolved` `attempts[]` | 实际命中目标 + 每次尝试 `{provider,model,outcome,latency,error}` |
 | 响应 | `output_redacted` `finish_reason` `tool_calls` | 脱敏输出、结束原因、工具调用数 |
-| 计量 | `input_tokens` `output_tokens` `cost_usd` | token + 成本(未知模型 None) |
+| 计量 | `input_tokens` `output_tokens` `cost_usd` | token + 成本(未知模型 None;**缓存命中 = 0.0**,代表本次省下的真实开销) |
 | 缓存 | `cache_hit` `cache_key` | 是否命中 |
 | 状态 | `status` `error_type` | `success / fallback_success / error` + 错误归类 |
 
@@ -88,12 +92,23 @@ agentctl/
 1. **路由** — 声明式配置:逻辑名 → 有序目标链。例 `default → [anthropic/opus-4-8, anthropic/sonnet-4-6]`。
 2. **回退** — 主目标遇可重试故障(429/5xx/overloaded/超时)→ 链上下一个;每次尝试入 `attempts[]`,最终 `status=fallback_success`。
 3. **重试/超时** — 每次尝试带超时 + 有界退避重试;**区分可重试(429/5xx/超时)vs 终态(4xx 鉴权/参数 → 不重试,直接透传)**。
-4. **成本** — 可版本化价表 → 实时算 `cost_usd` + 汇总;未知模型告警不阻断。
+4. **成本** — 可版本化价表 → 实时算 `cost_usd` + 汇总;未知模型告警不阻断;缓存命中记 0.0。
 5. **缓存** — 可选响应缓存,精确匹配 + TTL;语义缓存后置 v2。
 
 ### 容错原则(成熟度的核心体现)
 
 **治理侧故障绝不打断真实调用**:缓存挂、捕获写失败 → 记 warn、放行(fail-open,沿用 ops-agent 的 redaction/Langfuse no-op 范式)。但 **LLM 调用自身的终态错误照常透传给消费者**(不吞错)。
+
+### 并发 / 线程安全(成熟度)
+
+消费者可能多线程并发调用(如 agent 并行跑工具)。因此:
+- `SqliteCaptureStore`:`check_same_thread=False` + WAL 模式 + 写入加 `threading.Lock`(SQLite 单写多读,锁住写避免 `database is locked`)。
+- `MemoryCache`:get/set 加锁。
+- 治理引擎本身无共享可变状态(Router/CostMeter 只读)。
+
+### 启动期校验(fail-fast,别等线上炸)
+
+`GatewayClient.from_config` 与 `agentctl doctor` 必须校验:**每条路由目标的 provider 都已注册**。否则路由指向未注册 provider 会在调用时 `KeyError`——应在装配期就报错。
 
 ## 6. ops-agent 接入(首个真实消费者)
 
@@ -105,6 +120,7 @@ agentctl/
 
 - provider 异常分类:`RetriableError`(429/5xx/timeout/overloaded)、`TerminalError`(4xx auth/validation)。
 - 全链路重试耗尽 / 全目标回退失败 → 抛聚合错误给消费者,`status=error` + `attempts[]` 全留痕。
+- **失败目标的 attempts 必须留痕**:`_invoke_target` 即使抛异常,其内部每次尝试也要进入最终 `CallRecord.attempts`(实现上由 `invoke()` 持有共享 attempts 列表、`_invoke_target` 往里 append 后再抛,而非把 attempts 困在被抛弃的局部变量里)。
 - 治理组件(cache/store/cost)异常 → fail-open + warn,绝不影响主调用。
 
 ## 8. 测试策略(TDD)
