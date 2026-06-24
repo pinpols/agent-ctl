@@ -63,6 +63,8 @@ class GatewayClient:
         max_tokens: int = 1024,
         temperature: float | None = None,
         tools: list | None = None,
+        system: str | None = None,
+        tool_choice: dict | None = None,
         **metadata,
     ) -> NormalizedResponse:
         request = NormalizedRequest(
@@ -71,6 +73,8 @@ class GatewayClient:
             max_tokens=max_tokens,
             temperature=temperature,
             tools=tools,
+            system=system,
+            tool_choice=tool_choice,
             metadata=metadata,
         )
         return self._gateway.invoke(request)

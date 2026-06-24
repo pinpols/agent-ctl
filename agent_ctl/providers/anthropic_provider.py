@@ -32,6 +32,11 @@ class AnthropicProvider:
                 kwargs["temperature"] = request.temperature
             if request.tools:
                 kwargs["tools"] = request.tools
+            # system 提示 + 强制工具选择:工具调用型消费者依赖,缺省不传(向后兼容纯文本路由)。
+            if request.system is not None:
+                kwargs["system"] = request.system
+            if request.tool_choice is not None:
+                kwargs["tool_choice"] = request.tool_choice
             msg = self._client.messages.create(**kwargs)
         except Exception as exc:
             status = getattr(exc, "status_code", None)
@@ -49,10 +54,14 @@ class AnthropicProvider:
         tool_calls = sum(
             1 for b in msg.content if getattr(b, "type", None) == "tool_use"
         )
+        # raw=完整结构化响应(含 tool_use 块的 input):工具调用型消费者据此还原原生响应。
+        # 纯文本消费者忽略它即可,零成本。SDK Message 是 pydantic → model_dump;无该方法则 None。
+        raw = msg.model_dump(mode="json") if hasattr(msg, "model_dump") else None
         return NormalizedResponse(
             text=text,
             finish_reason=getattr(msg, "stop_reason", None),
             tool_calls=tool_calls,
             input_tokens=getattr(msg.usage, "input_tokens", 0),
             output_tokens=getattr(msg.usage, "output_tokens", 0),
+            raw=raw,
         )
