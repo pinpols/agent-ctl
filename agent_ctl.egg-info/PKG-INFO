@@ -8,5 +8,12 @@ Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
 Requires-Dist: ruff>=0.5; extra == "dev"
 Requires-Dist: mypy>=1.10; extra == "dev"
+Requires-Dist: fastapi>=0.115; extra == "dev"
+Requires-Dist: httpx>=0.27; extra == "dev"
 Provides-Extra: anthropic
 Requires-Dist: anthropic>=0.40; extra == "anthropic"
+Provides-Extra: openai
+Requires-Dist: openai>=1.40; extra == "openai"
+Provides-Extra: server
+Requires-Dist: fastapi>=0.115; extra == "server"
+Requires-Dist: uvicorn>=0.30; extra == "server"

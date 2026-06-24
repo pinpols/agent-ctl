@@ -134,6 +134,11 @@ class Gateway:
         targets = self._router.resolve(request.model)
         all_attempts: list[Attempt] = []  # 共享:_invoke_target 往里 append,失败也留痕
         for idx, target in enumerate(targets):
+            if target.provider not in self._providers:
+                # '/'-直连到未注册 provider:抛类型化错误而非裸 KeyError
+                raise GatewayError(
+                    f"unregistered provider: {target.provider!r} (model={request.model!r})"
+                )
             provider = self._providers[target.provider]
             try:
                 resp = self._invoke_target(provider, target, request, all_attempts)

@@ -15,6 +15,8 @@ class RetryConfig(BaseModel):
 
 class Config(BaseModel):
     routes: dict[str, list[str]] = {"default": ["anthropic/claude-sonnet-4-6"]}
+    # 裸模型名 → "provider/model"(OpenAI 兼容 server 用,如 deepseek-chat→deepseek/deepseek-chat)
+    model_aliases: dict[str, str] = {}
     prices: dict[str, tuple[float, float]] = {}
     cache_enabled: bool = True
     cache_ttl_s: int = 600

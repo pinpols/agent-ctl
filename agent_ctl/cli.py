@@ -58,7 +58,48 @@ def _cmd_doctor(cfg, args) -> int:
     return 0
 
 
-_COMMANDS = {"captures": _cmd_captures, "cost": _cmd_cost, "doctor": _cmd_doctor}
+def _cmd_serve(cfg, args) -> int:
+    """起 OpenAI 兼容网关:按目录构造 providers(仅有 key 的)+ Gateway + FastAPI server。"""
+    import uvicorn
+
+    from agent_ctl.core.cache import MemoryCache
+    from agent_ctl.core.cost import CostMeter
+    from agent_ctl.core.gateway import Gateway
+    from agent_ctl.core.router import Router
+    from agent_ctl.providers.catalog import available_providers, build_providers
+    from agent_ctl.server.app import build_server
+    from agent_ctl.store.sqlite_store import SqliteCaptureStore
+
+    avail = available_providers()
+    if not avail:
+        print(
+            "FAIL: 没有任何 provider 的 api key(设 ANTHROPIC_API_KEY / OPENAI_API_KEY / "
+            "DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / GLM_API_KEY 之一)"
+        )
+        return 1
+    print(f"已启用 provider: {avail}")
+    providers = build_providers()
+    gateway = Gateway(
+        router=Router(cfg.routes, cfg.model_aliases),
+        providers=providers,
+        cost_meter=CostMeter(cfg.prices),
+        store=SqliteCaptureStore(cfg.db_path),
+        cache=MemoryCache() if cfg.cache_enabled else None,
+        retry=cfg.retry,
+        cache_enabled=cfg.cache_enabled,
+        cache_ttl_s=cfg.cache_ttl_s,
+    )
+    app = build_server(gateway, models=sorted(cfg.model_aliases) or avail)
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
+_COMMANDS = {
+    "captures": _cmd_captures,
+    "cost": _cmd_cost,
+    "doctor": _cmd_doctor,
+    "serve": _cmd_serve,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     p_cap.add_argument("--limit", type=int, default=20)
     sub.add_parser("cost")
     sub.add_parser("doctor")
+    p_serve = sub.add_parser("serve")
+    p_serve.add_argument("--host", default="0.0.0.0")
+    p_serve.add_argument("--port", type=int, default=8400)
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     return _COMMANDS[args.command](cfg, args)

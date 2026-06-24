@@ -45,7 +45,7 @@ class GatewayClient:
         if problems:
             raise ValueError("路由配置校验失败:\n  - " + "\n  - ".join(problems))
         gateway = Gateway(
-            router=Router(config.routes),
+            router=Router(config.routes, config.model_aliases),
             providers=providers,
             cost_meter=CostMeter(config.prices),
             store=SqliteCaptureStore(config.db_path),
