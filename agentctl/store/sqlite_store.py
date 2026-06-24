@@ -57,17 +57,19 @@ class SqliteCaptureStore:
             self._conn.commit()
 
     def list_recent(self, limit: int) -> list[CallRecord]:
-        rows = self._conn.execute(
-            "SELECT doc FROM call_record ORDER BY ts DESC LIMIT ?", (limit,)
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc FROM call_record ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [CallRecord(**json.loads(r["doc"])) for r in rows]
 
     def cost_summary(self) -> dict:
-        row = self._conn.execute(
-            "SELECT COUNT(*) c, COALESCE(SUM(cost_usd),0) cost,"
-            " COALESCE(SUM(input_tokens),0) it, COALESCE(SUM(output_tokens),0) ot"
-            " FROM call_record"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) c, COALESCE(SUM(cost_usd),0) cost,"
+                " COALESCE(SUM(input_tokens),0) it, COALESCE(SUM(output_tokens),0) ot"
+                " FROM call_record"
+            ).fetchone()
         return {
             "calls": row["c"],
             "total_cost_usd": row["cost"],

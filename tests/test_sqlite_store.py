@@ -32,6 +32,40 @@ def test_cost_summary(tmp_path):
     assert s["total_input_tokens"] == 20
 
 
+def test_concurrent_read_write_thread_safe(tmp_path):
+    import threading
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    n_writers = 4
+    writes_per_thread = 25  # total = 100
+    errors: list[Exception] = []
+
+    def writer(start):
+        try:
+            for i in range(writes_per_thread):
+                store.save(_rec(f"w{start}-{i}", 0.001))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def reader():
+        try:
+            for _ in range(30):
+                store.list_recent(10)
+                store.cost_summary()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_writers)]
+    threads += [threading.Thread(target=reader) for _ in range(3)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert errors == [], f"Thread errors: {errors}"
+    assert store.cost_summary()["calls"] == n_writers * writes_per_thread
+
+
 def test_concurrent_writes_thread_safe(tmp_path):
     import threading
 
