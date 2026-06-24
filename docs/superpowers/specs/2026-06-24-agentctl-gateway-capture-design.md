@@ -1,6 +1,6 @@
-# agentgate — 调用网关 + 全量捕获(设计)
+# agentctl — 调用网关 + 全量捕获(设计)
 
-> 工作名 `agentgate`(可改)。本文件是 **AgentOps 控制面** 的第一个子项目(脊柱)的设计。
+> 项目名 `agentctl`(已定)。本文件是 **AgentOps 控制面** 的第一个子项目(脊柱)的设计。
 > 日期:2026-06-24。状态:待用户复核 → 转 writing-plans。
 
 ## 1. 背景与北极星
@@ -45,7 +45,7 @@
 **核心 = 传输无关的治理引擎**(纯逻辑:routing/fallback/retry/cost/cache/capture)。接入形态决策:**方案 C —— 核心 + 双形态**:本期出"库形态",代理形态留接口/骨架不实现。兼顾出活速度与"任意 agent 接入"的 showcase 卖点。
 
 ```
-agentgate/
+agentctl/
   core/        治理引擎(传输无关):router / fallback / retry / cost / cache / capture 编排
   providers/   provider 适配(本期仅 Anthropic;接口预留 OpenAI/Ollama)
   store/       捕获存储(本期 SQLite + repository 接口;预留 PG)
@@ -111,7 +111,7 @@ agentgate/
 
 - **离线 `FakeProvider`**:可脚本化产出成功/失败/超时/限流,**无需真 key** 即可测全部治理逻辑。
 - 覆盖:路由选择、回退切换、重试退避与终态不重试、成本计算(含未知模型)、缓存命中/失效/TTL、捕获落库与脱敏、治理 fail-open。
-- 沿用 ops-agent 工具链:pytest + ruff + mypy;`agentgate doctor` 配置自检。
+- 沿用 ops-agent 工具链:pytest + ruff + mypy;`agentctl doctor` 配置自检。
 
 ## 9. 北极星路线(本期 = 第 1 根支柱)
 
