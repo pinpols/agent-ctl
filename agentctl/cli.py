@@ -7,6 +7,9 @@ from agentctl.config import load_config
 from agentctl.models import Target
 from agentctl.store.sqlite_store import SqliteCaptureStore
 
+# KNOWN_PROVIDERS 是静态 lint 集合:仅列举 agentctl 当前随包附带内建适配器的 provider 名。
+# 它不是运行时接线检查——运行时权威校验由 GatewayClient.from_config 中的
+# validate_routes 负责。doctor 命令使用此集合给出"无内建适配器"的早期提示。
 KNOWN_PROVIDERS = {"anthropic"}  # 本期内建;新增 provider 时同步扩充
 
 
@@ -39,8 +42,8 @@ def _cmd_doctor(cfg, args) -> int:
                 continue
             if target.provider not in KNOWN_PROVIDERS:
                 problems.append(
-                    f"route {logical!r} → {spec!r}: 未知 provider {target.provider!r}"
-                    f"(已知 {sorted(KNOWN_PROVIDERS)})"
+                    f"route {logical!r} → {spec!r}: provider {target.provider!r} 无内建适配器 "
+                    f"(内建适配器: {sorted(KNOWN_PROVIDERS)})"
                 )
     if cfg.profile == "prod" and not cfg.prices:
         problems.append("prod profile 下 prices 为空:成本将全为 None")

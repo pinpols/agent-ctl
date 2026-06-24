@@ -8,7 +8,7 @@ from agentctl.config import RetryConfig
 from agentctl.providers.fake import FakeProvider
 from agentctl.store.sqlite_store import SqliteCaptureStore
 from agentctl.models import NormalizedRequest
-from agentctl.errors import AllTargetsFailed
+from agentctl.errors import AllTargetsFailed, GatewayError
 
 REQ = NormalizedRequest(
     model="default",
@@ -71,6 +71,17 @@ def test_cache_hit_skips_provider_and_costs_zero(tmp_path):
     hit = store.list_recent(1)[0]
     assert hit.cache_hit is True
     assert hit.cost_usd == 0.0  # 命中=省下的开销
+
+
+def test_unregistered_provider_raises_gateway_error():
+    """路由指向未注册 provider 时,Gateway.__init__ 应抛 GatewayError 而非 KeyError。"""
+    with pytest.raises(GatewayError, match="unregistered provider"):
+        Gateway(
+            router=Router({"default": ["missing_provider/model-x"]}),
+            providers={"fake": FakeProvider(["ok"])},
+            cost_meter=CostMeter({}),
+            retry=RETRY,
+        )
 
 
 def test_store_failure_is_fail_open(tmp_path):

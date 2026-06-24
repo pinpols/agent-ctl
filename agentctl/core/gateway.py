@@ -9,7 +9,12 @@ from agentctl.config import RetryConfig
 from agentctl.core.cache import make_key
 from agentctl.core.cost import CostMeter
 from agentctl.core.router import Router
-from agentctl.errors import AllTargetsFailed, RetriableError, TerminalError
+from agentctl.errors import (
+    AllTargetsFailed,
+    GatewayError,
+    RetriableError,
+    TerminalError,
+)
 from agentctl.models import (
     Attempt,
     CallRecord,
@@ -43,6 +48,17 @@ class Gateway:
         self._retry = retry or RetryConfig()
         self._cache_enabled = cache_enabled
         self._cache_ttl_s = cache_ttl_s
+
+        # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError
+        missing = {
+            t.provider
+            for t in self._router.all_targets()
+            if t.provider not in self._providers
+        }
+        if missing:
+            raise GatewayError(
+                f"unregistered provider(s) for route targets: {sorted(missing)}"
+            )
 
     def _invoke_target(
         self,

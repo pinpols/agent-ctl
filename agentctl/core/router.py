@@ -13,3 +13,10 @@ class Router:
         if logical not in self._routes:
             raise KeyError(f"unknown logical model: {logical!r}")
         return list(self._routes[logical])
+
+    def all_targets(self) -> list[Target]:
+        """返回所有路由中的每个 Target(不去重)。"""
+        result: list[Target] = []
+        for targets in self._routes.values():
+            result.extend(targets)
+        return result

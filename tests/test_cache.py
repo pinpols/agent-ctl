@@ -19,6 +19,42 @@ def test_make_key_stable_and_distinct():
     assert k1 != k3
 
 
+def test_make_key_differs_on_max_tokens():
+    """max_tokens 不同应生成不同 key。"""
+    k1 = make_key(
+        NormalizedRequest(
+            model="default", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        )
+    )
+    k2 = make_key(
+        NormalizedRequest(
+            model="default",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=128,
+        )
+    )
+    assert k1 != k2
+
+
+def test_make_key_differs_on_temperature():
+    """temperature 不同应生成不同 key。"""
+    k1 = make_key(
+        NormalizedRequest(
+            model="default",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.0,
+        )
+    )
+    k2 = make_key(
+        NormalizedRequest(
+            model="default",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.9,
+        )
+    )
+    assert k1 != k2
+
+
 def test_cache_get_set_and_miss():
     c = MemoryCache()
     assert c.get("k") is None

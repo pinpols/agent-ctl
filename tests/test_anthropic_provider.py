@@ -1,3 +1,6 @@
+import pytest
+
+from agentctl.errors import RetriableError, TerminalError
 from agentctl.providers.anthropic_provider import AnthropicProvider, classify_status
 from agentctl.models import Target, NormalizedRequest
 
@@ -50,3 +53,38 @@ def test_classify_status():
     assert classify_status(500) == "retriable"
     assert classify_status(401) == "terminal"
     assert classify_status(400) == "terminal"
+
+
+class _StatusError(Exception):
+    """携带 status_code 属性的假 SDK 异常。"""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+class _FakeMessagesStatus:
+    def __init__(self, status_code: int) -> None:
+        self._status_code = status_code
+
+    def create(self, **kwargs):
+        raise _StatusError(self._status_code)
+
+
+class _FakeClientStatus:
+    def __init__(self, status_code: int) -> None:
+        self.messages = _FakeMessagesStatus(status_code)
+
+
+def test_status_401_raises_terminal_error():
+    """401 应映射为 TerminalError(终态,不重试)。"""
+    p = AnthropicProvider(_FakeClientStatus(401))
+    with pytest.raises(TerminalError):
+        p.invoke(T, REQ, timeout=5.0)
+
+
+def test_status_503_raises_retriable_error():
+    """503 应映射为 RetriableError(可重试)。"""
+    p = AnthropicProvider(_FakeClientStatus(503))
+    with pytest.raises(RetriableError):
+        p.invoke(T, REQ, timeout=5.0)
