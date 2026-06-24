@@ -47,6 +47,47 @@ def test_invoke_passes_timeout_to_sdk():
     assert client.messages.last_kwargs["timeout"] == 12.5
 
 
+def test_invoke_passes_system_and_tool_choice():
+    client = _FakeClient("ok")
+    req = NormalizedRequest(
+        model="default",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        system="你是 SRE",
+        tool_choice={"type": "tool", "name": "report"},
+        tools=[{"name": "report"}],
+    )
+    AnthropicProvider(client).invoke(T, req, timeout=5.0)
+    kw = client.messages.last_kwargs
+    assert kw["system"] == "你是 SRE"
+    assert kw["tool_choice"] == {"type": "tool", "name": "report"}
+    assert kw["tools"] == [{"name": "report"}]
+
+
+def test_invoke_omits_system_tool_choice_when_absent():
+    # 纯文本路由消费者:不传 system/tool_choice → kwargs 里不出现(向后兼容)
+    client = _FakeClient("ok")
+    AnthropicProvider(client).invoke(T, REQ, timeout=5.0)
+    assert "system" not in client.messages.last_kwargs
+    assert "tool_choice" not in client.messages.last_kwargs
+
+
+def test_invoke_populates_raw_when_sdk_supports_model_dump():
+    class _Msg:
+        content = [type("B", (), {"type": "text", "text": "hi"})()]
+        stop_reason = "end_turn"
+        usage = type("U", (), {"input_tokens": 1, "output_tokens": 2})()
+
+        def model_dump(self, mode="python"):
+            return {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+
+    class _Client:
+        messages = type("M", (), {"create": staticmethod(lambda **k: _Msg())})()
+
+    resp = AnthropicProvider(_Client()).invoke(T, REQ, timeout=5.0)
+    assert resp.raw == {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+
+
 def test_classify_status():
     assert classify_status(429) == "retriable"
     assert classify_status(529) == "retriable"

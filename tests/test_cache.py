@@ -19,6 +19,16 @@ def test_make_key_stable_and_distinct():
     assert k1 != k3
 
 
+def test_make_key_differs_on_system_tools_tool_choice():
+    """system / tools / tool_choice 改变响应形状,必须进 key,否则不同形状请求错误命中同一缓存。"""
+    base = NormalizedRequest(model="default", messages=[{"role": "user", "content": "hi"}])
+    assert make_key(base) != make_key(base.model_copy(update={"system": "你是 SRE"}))
+    assert make_key(base) != make_key(base.model_copy(update={"tools": [{"name": "x"}]}))
+    assert make_key(base) != make_key(
+        base.model_copy(update={"tool_choice": {"type": "tool", "name": "x"}})
+    )
+
+
 def test_make_key_differs_on_max_tokens():
     """max_tokens 不同应生成不同 key。"""
     k1 = make_key(

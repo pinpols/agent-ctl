@@ -26,6 +26,10 @@ class NormalizedRequest(BaseModel):
     max_tokens: int = 1024
     temperature: float | None = None
     tools: list | None = None
+    # 工具调用型消费者(如 ops-agent)需要这两项:system 提示 + 强制工具选择。
+    # 缺省 None=不传,对纯文本路由消费者完全向后兼容。
+    system: str | None = None
+    tool_choice: dict | None = None
     metadata: dict = {}
 
 

@@ -11,12 +11,17 @@ from agent_ctl.models import NormalizedRequest, NormalizedResponse
 
 
 def make_key(request: NormalizedRequest) -> str:
+    # 缓存键必须涵盖一切会改变响应的入参。tools/system/tool_choice 直接决定响应形状
+    # (纯文本 vs 强制 tool_use),漏掉它们会让不同形状的请求命中同一缓存 → 返回错误结构。
     payload = json.dumps(
         {
             "model": request.model,
             "messages": request.messages,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
+            "tools": request.tools,
+            "system": request.system,
+            "tool_choice": request.tool_choice,
         },
         sort_keys=True,
         ensure_ascii=False,
