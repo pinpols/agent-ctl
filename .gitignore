@@ -1,0 +1,5 @@
+.superpowers/
+.venv/
+__pycache__/
+*.pyc
+.agentctl/

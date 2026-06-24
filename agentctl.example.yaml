@@ -1,0 +1,13 @@
+routes:
+  default: [anthropic/claude-opus-4-8, anthropic/claude-sonnet-4-6]
+prices:                 # [input_per_1M_usd, output_per_1M_usd]
+  claude-opus-4-8: [5.0, 25.0]
+  claude-sonnet-4-6: [3.0, 15.0]
+cache_enabled: true
+cache_ttl_s: 600
+profile: dev
+db_path: .agentctl/capture.db
+retry:
+  max_attempts_per_target: 2
+  base_backoff_s: 0.2
+  timeout_s: 60
