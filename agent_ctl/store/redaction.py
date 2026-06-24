@@ -22,12 +22,15 @@ def redact(text: str) -> str:
     return out
 
 
+def redact_value(value):
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_value(item) for key, item in value.items()}
+    return value
+
+
 def redact_messages(messages: list[dict]) -> list[dict]:
-    result = []
-    for m in messages:
-        copy = dict(m)
-        content = copy.get("content")
-        if isinstance(content, str):
-            copy["content"] = redact(content)
-        result.append(copy)
-    return result
+    return [redact_value(m) for m in messages]

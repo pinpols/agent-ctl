@@ -52,3 +52,17 @@ def test_retriable_exhausted_records_all_attempts():
         gw._invoke_target(p, T, REQ, attempts)
     assert len(p.calls) == 2
     assert [a.outcome for a in attempts] == ["retriable", "retriable"]  # 失败也留痕
+
+
+def test_backoff_applies_bounded_jitter(monkeypatch):
+    monkeypatch.setattr("agent_ctl.core.gateway.random.uniform", lambda low, high: high)
+    gw = _gw(
+        FakeProvider(["ok"]),
+        retry=RetryConfig(
+            max_attempts_per_target=2,
+            base_backoff_s=1.0,
+            timeout_s=1.0,
+            jitter_ratio=0.25,
+        ),
+    )
+    assert gw._backoff_s(1) == 2.5

@@ -2,32 +2,51 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 
 from agent_ctl.config import load_config
 from agent_ctl.models import Target
+from agent_ctl.providers.catalog import PROVIDER_CATALOG
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 # KNOWN_PROVIDERS 是静态 lint 集合:仅列举 agent_ctl 当前随包附带内建适配器的 provider 名。
 # 它不是运行时接线检查——运行时权威校验由 GatewayClient.from_config 中的
 # validate_routes 负责。doctor 命令使用此集合给出"无内建适配器"的早期提示。
-KNOWN_PROVIDERS = {
-    "anthropic",
-    "openai",
-}  # 内建适配器(静态校验用);运行时以注入的 providers 为准
+KNOWN_PROVIDERS = set(PROVIDER_CATALOG)  # 运行时以注入的 providers 为准
 
 
 def _cmd_captures(cfg, args) -> int:
-    store = SqliteCaptureStore(cfg.db_path)
-    for rec in store.list_recent(args.limit):
+    since = _parse_since(args.since)
+    with SqliteCaptureStore(cfg.db_path) as store:
+        records = store.list_recent(
+            args.limit,
+            consumer=args.consumer,
+            status=args.status,
+            model=args.model,
+            since=since,
+        )
+    if args.json:
+        print(json.dumps([r.model_dump(mode="json") for r in records], indent=2))
+        return 0
+    for rec in records:
         print(
-            f"{rec.id[:8]} {rec.status:16} {rec.model_resolved or '-':28} "
+            f"{rec.id[:8]} {rec.status:16} {rec.consumer:16} "
+            f"{rec.model_resolved or rec.model_requested or '-':28} "
             f"in={rec.input_tokens} out={rec.output_tokens} cost={rec.cost_usd}"
         )
     return 0
 
 
 def _cmd_cost(cfg, args) -> int:
-    summary = SqliteCaptureStore(cfg.db_path).cost_summary()
+    since = _parse_since(args.since)
+    with SqliteCaptureStore(cfg.db_path) as store:
+        summary = store.cost_summary(
+            consumer=args.consumer,
+            status=args.status,
+            model=args.model,
+            since=since,
+            group_by=args.group_by,
+        )
     print(json.dumps(summary, indent=2))
     return 0
 
@@ -70,6 +89,9 @@ def _cmd_serve(cfg, args) -> int:
     from agent_ctl.server.app import build_server
     from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
+    if args.host not in {"127.0.0.1", "localhost", "::1"} and not args.api_token:
+        print("FAIL: non-local serve requires --api-token")
+        return 1
     avail = available_providers()
     if not avail:
         print(
@@ -88,10 +110,27 @@ def _cmd_serve(cfg, args) -> int:
         retry=cfg.retry,
         cache_enabled=cfg.cache_enabled,
         cache_ttl_s=cfg.cache_ttl_s,
+        cache_tool_responses=cfg.cache_tool_responses,
     )
-    app = build_server(gateway, models=sorted(cfg.model_aliases) or avail)
+    app = build_server(
+        gateway,
+        models=sorted(cfg.model_aliases) or avail,
+        api_token=args.api_token,
+        max_request_bytes=args.max_request_bytes,
+        rate_limit_per_minute=args.rate_limit_per_minute,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
+
+
+def _parse_since(value: str | None) -> float | None:
+    if value is None:
+        return None
+    if value.endswith("h"):
+        return time.time() - float(value[:-1]) * 3600
+    if value.endswith("d"):
+        return time.time() - float(value[:-1]) * 86400
+    return float(value)
 
 
 _COMMANDS = {
@@ -108,11 +147,24 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_cap = sub.add_parser("captures")
     p_cap.add_argument("--limit", type=int, default=20)
-    sub.add_parser("cost")
+    p_cap.add_argument("--consumer")
+    p_cap.add_argument("--status")
+    p_cap.add_argument("--model")
+    p_cap.add_argument("--since", help="Unix timestamp, Nh, or Nd")
+    p_cap.add_argument("--json", action="store_true")
+    p_cost = sub.add_parser("cost")
+    p_cost.add_argument("--consumer")
+    p_cost.add_argument("--status")
+    p_cost.add_argument("--model")
+    p_cost.add_argument("--since", help="Unix timestamp, Nh, or Nd")
+    p_cost.add_argument("--group-by", choices=["model", "consumer", "status", "day"])
     sub.add_parser("doctor")
     p_serve = sub.add_parser("serve")
-    p_serve.add_argument("--host", default="0.0.0.0")
+    p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8400)
+    p_serve.add_argument("--api-token", default=None)
+    p_serve.add_argument("--max-request-bytes", type=int, default=1_000_000)
+    p_serve.add_argument("--rate-limit-per-minute", type=int, default=120)
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     return _COMMANDS[args.command](cfg, args)

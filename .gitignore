@@ -3,3 +3,8 @@
 __pycache__/
 *.pyc
 .agent_ctl/
+.DS_Store
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

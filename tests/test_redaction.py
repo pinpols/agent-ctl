@@ -38,3 +38,23 @@ def test_redact_cn_mobile():
     out = redact("call 13800138000 now")
     assert "13800138000" not in out
     assert "[REDACTED]" in out
+
+
+def test_redact_messages_recurses_into_content_blocks_and_tool_inputs():
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "email a@b.com"},
+                {
+                    "type": "tool_result",
+                    "content": {"dsn": "postgresql://user:secretpw@host/db"},
+                },
+            ],
+        }
+    ]
+    out = redact_messages(msgs)
+    text_block = out[0]["content"][0]
+    tool_block = out[0]["content"][1]
+    assert "a@b.com" not in text_block["text"]
+    assert "secretpw" not in tool_block["content"]["dsn"]

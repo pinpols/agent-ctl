@@ -10,3 +10,13 @@ def test_cost_known_model():
 def test_cost_unknown_model_returns_none():
     m = CostMeter({})
     assert m.cost("mystery", 1000, 500) is None
+
+
+def test_cost_prefers_provider_qualified_price():
+    m = CostMeter({"openai/gpt": (1.0, 2.0), "gpt": (9.0, 9.0)})
+    assert m.cost("openai/gpt", 1000, 500) == 0.002
+
+
+def test_cost_falls_back_to_bare_model_price():
+    m = CostMeter({"gpt": (1.0, 2.0)})
+    assert m.cost("openai/gpt", 1000, 500) == 0.002

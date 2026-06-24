@@ -73,6 +73,36 @@ def test_cache_hit_skips_provider_and_costs_zero(tmp_path):
     assert hit.cost_usd == 0.0  # 命中=省下的开销
 
 
+def test_tool_requests_are_not_cached_by_default(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    cache = MemoryCache()
+    p = FakeProvider(["ok", "ok"])
+    gw = _gw(p, store, cache)
+    req = REQ.model_copy(update={"tools": [{"name": "x"}]})
+    gw.invoke(req)
+    gw.invoke(req)
+    assert len(p.calls) == 2
+
+
+def test_tool_requests_can_be_cached_when_enabled(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    cache = MemoryCache()
+    p = FakeProvider(["ok", "ok"])
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": p},
+        cost_meter=CostMeter({"a": (5.0, 25.0)}),
+        store=store,
+        cache=cache,
+        retry=RETRY,
+        cache_tool_responses=True,
+    )
+    req = REQ.model_copy(update={"tools": [{"name": "x"}]})
+    gw.invoke(req)
+    gw.invoke(req)
+    assert len(p.calls) == 1
+
+
 def test_unregistered_provider_raises_gateway_error():
     """路由指向未注册 provider 时,Gateway.__init__ 应抛 GatewayError 而非 KeyError。"""
     with pytest.raises(GatewayError, match="unregistered provider"):
@@ -82,6 +112,73 @@ def test_unregistered_provider_raises_gateway_error():
             cost_meter=CostMeter({}),
             retry=RETRY,
         )
+
+
+def test_unknown_model_records_routing_error(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": FakeProvider(["ok"])},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RETRY,
+    )
+    with pytest.raises(GatewayError, match="unknown model"):
+        gw.invoke(
+            NormalizedRequest(
+                model="missing",
+                messages=[{"role": "user", "content": "hi"}],
+                metadata={"consumer": "t"},
+            )
+        )
+    rec = store.list_recent(1)[0]
+    assert rec.status == "error"
+    assert rec.error_type == "routing"
+    assert rec.error_message_redacted is not None
+    assert rec.model_requested == "missing"
+
+
+def test_direct_unregistered_provider_records_error(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": FakeProvider(["ok"])},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RETRY,
+    )
+    with pytest.raises(GatewayError, match="unregistered provider"):
+        gw.invoke(
+            NormalizedRequest(
+                model="missing_provider/model-x",
+                messages=[{"role": "user", "content": "hi"}],
+                metadata={"consumer": "t"},
+            )
+        )
+    rec = store.list_recent(1)[0]
+    assert rec.status == "error"
+    assert rec.error_type == "provider"
+    assert rec.model_resolved == "missing_provider/model-x"
+
+
+def test_cost_failure_still_saves_capture_record(tmp_path):
+    class BadCost:
+        def cost(self, model, input_tokens, output_tokens):
+            raise RuntimeError("price table broken")
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": FakeProvider(["ok"])},
+        cost_meter=BadCost(),
+        store=store,
+        retry=RETRY,
+    )
+    resp = gw.invoke(REQ)
+    assert resp.text == "fake-ok"
+    rec = store.list_recent(1)[0]
+    assert rec.status == "success"
+    assert rec.cost_usd is None
 
 
 def test_store_failure_is_fail_open(tmp_path):

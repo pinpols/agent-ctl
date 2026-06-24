@@ -8,6 +8,7 @@ Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
 Requires-Dist: ruff>=0.5; extra == "dev"
 Requires-Dist: mypy>=1.10; extra == "dev"
+Requires-Dist: types-PyYAML>=6; extra == "dev"
 Requires-Dist: fastapi>=0.115; extra == "dev"
 Requires-Dist: httpx>=0.27; extra == "dev"
 Provides-Extra: anthropic

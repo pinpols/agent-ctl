@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 agent_ctl/__init__.py
 agent_ctl/cli.py

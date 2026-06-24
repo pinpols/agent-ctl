@@ -8,6 +8,8 @@ from pathlib import Path
 
 from agent_ctl.models import CallRecord
 
+SCHEMA_VERSION = 1
+
 
 class SqliteCaptureStore:
     """SQLite 捕获存储:一行一条 CallRecord(JSON 整存 + 关键列冗余便于聚合)。
@@ -32,22 +34,80 @@ class SqliteCaptureStore:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS call_record ("
                 " id TEXT PRIMARY KEY, ts REAL, consumer TEXT, status TEXT,"
+                " model_requested TEXT, model_resolved TEXT,"
                 " input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL,"
                 " doc TEXT NOT NULL)"
             )
+            self._ensure_columns()
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                " version INTEGER PRIMARY KEY, applied_at REAL DEFAULT (unixepoch()))"
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (SCHEMA_VERSION,),
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_call_record_ts ON call_record(ts)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_call_record_consumer "
+                "ON call_record(consumer)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_call_record_status "
+                "ON call_record(status)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_call_record_model_status "
+                "ON call_record(model_resolved, status)"
+            )
             self._conn.commit()
+
+    def _ensure_columns(self) -> None:
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(call_record)").fetchall()
+        }
+        for name in ("model_requested", "model_resolved"):
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE call_record ADD COLUMN {name} TEXT")
+        self._backfill_model_columns()
+
+    def _backfill_model_columns(self) -> None:
+        rows = self._conn.execute(
+            "SELECT id, doc FROM call_record "
+            "WHERE model_requested IS NULL OR model_resolved IS NULL"
+        ).fetchall()
+        for row in rows:
+            try:
+                data = json.loads(row["doc"])
+            except json.JSONDecodeError:
+                continue
+            self._conn.execute(
+                "UPDATE call_record SET model_requested = ?, model_resolved = ? "
+                "WHERE id = ?",
+                (
+                    data.get("model_requested", ""),
+                    data.get("model_resolved"),
+                    row["id"],
+                ),
+            )
 
     def save(self, record: CallRecord) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO call_record"
-                " (id, ts, consumer, status, input_tokens, output_tokens, cost_usd, doc)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                " (id, ts, consumer, status, model_requested, model_resolved,"
+                " input_tokens, output_tokens, cost_usd, doc)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     record.id,
                     record.ts,
                     record.consumer,
                     record.status,
+                    record.model_requested,
+                    record.model_resolved,
                     record.input_tokens,
                     record.output_tokens,
                     record.cost_usd,
@@ -56,19 +116,73 @@ class SqliteCaptureStore:
             )
             self._conn.commit()
 
-    def list_recent(self, limit: int) -> list[CallRecord]:
+    def list_recent(
+        self,
+        limit: int,
+        *,
+        consumer: str | None = None,
+        status: str | None = None,
+        model: str | None = None,
+        since: float | None = None,
+    ) -> list[CallRecord]:
+        where, params = self._filters(
+            consumer=consumer, status=status, model=model, since=since
+        )
         with self._lock:
             rows = self._conn.execute(
-                "SELECT doc FROM call_record ORDER BY ts DESC LIMIT ?", (limit,)
+                f"SELECT doc FROM call_record{where} ORDER BY ts DESC LIMIT ?",
+                (*params, limit),
             ).fetchall()
         return [CallRecord(**json.loads(r["doc"])) for r in rows]
 
-    def cost_summary(self) -> dict:
+    def cost_summary(
+        self,
+        *,
+        consumer: str | None = None,
+        status: str | None = None,
+        model: str | None = None,
+        since: float | None = None,
+        group_by: str | None = None,
+    ) -> dict:
+        where, params = self._filters(
+            consumer=consumer, status=status, model=model, since=since
+        )
+        if group_by is not None:
+            group_expr = {
+                "consumer": "consumer",
+                "status": "status",
+                "model": "COALESCE(model_resolved, model_requested, '')",
+                "day": "date(ts, 'unixepoch')",
+            }.get(group_by)
+            if group_expr is None:
+                raise ValueError(f"bad group_by: {group_by!r}")
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT {group_expr} bucket, COUNT(*) calls,"
+                    " COALESCE(SUM(cost_usd),0) cost,"
+                    " COALESCE(SUM(input_tokens),0) it,"
+                    " COALESCE(SUM(output_tokens),0) ot"
+                    f" FROM call_record{where} GROUP BY bucket ORDER BY bucket",
+                    params,
+                ).fetchall()
+            return {
+                "groups": [
+                    {
+                        "bucket": row["bucket"],
+                        "calls": row["calls"],
+                        "total_cost_usd": row["cost"],
+                        "total_input_tokens": row["it"],
+                        "total_output_tokens": row["ot"],
+                    }
+                    for row in rows
+                ]
+            }
         with self._lock:
             row = self._conn.execute(
                 "SELECT COUNT(*) c, COALESCE(SUM(cost_usd),0) cost,"
                 " COALESCE(SUM(input_tokens),0) it, COALESCE(SUM(output_tokens),0) ot"
-                " FROM call_record"
+                f" FROM call_record{where}",
+                params,
             ).fetchone()
         return {
             "calls": row["c"],
@@ -76,3 +190,38 @@ class SqliteCaptureStore:
             "total_input_tokens": row["it"],
             "total_output_tokens": row["ot"],
         }
+
+    def _filters(
+        self,
+        *,
+        consumer: str | None,
+        status: str | None,
+        model: str | None,
+        since: float | None,
+    ) -> tuple[str, tuple]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if consumer:
+            clauses.append("consumer = ?")
+            params.append(consumer)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if model:
+            clauses.append("(model_resolved = ? OR model_requested = ?)")
+            params.extend([model, model])
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return where, tuple(params)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> "SqliteCaptureStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()

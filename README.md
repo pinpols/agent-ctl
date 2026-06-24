@@ -1,0 +1,104 @@
+# agent-ctl
+
+`agent-ctl` is a local AgentOps gateway for LLM calls. It gives agents one governed path for model routing, fallback, retry, cost accounting, response caching, and redacted call capture.
+
+## Install
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev,anthropic,openai,server]"
+```
+
+For development, the expected checks are:
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
+.venv/bin/python -m mypy agent_ctl
+```
+
+## Configure
+
+Copy the example and edit routes, prices, and aliases:
+
+```bash
+cp agent-ctl.example.yaml agent_ctl.yaml
+```
+
+Provider credentials are read from environment variables:
+
+```bash
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+export DEEPSEEK_API_KEY=...
+export DASHSCOPE_API_KEY=...
+export GLM_API_KEY=...
+```
+
+Run a config check:
+
+```bash
+.venv/bin/agent-ctl --config agent_ctl.yaml doctor
+```
+
+## CLI
+
+Recent captures:
+
+```bash
+.venv/bin/agent-ctl --config agent_ctl.yaml captures --limit 20 --status error --json
+```
+
+Cost summary:
+
+```bash
+.venv/bin/agent-ctl --config agent_ctl.yaml cost --group-by model
+```
+
+Available `cost --group-by` values are `model`, `consumer`, `status`, and `day`.
+
+## Library Usage
+
+```python
+from agent_ctl.client.gateway_client import GatewayClient
+from agent_ctl.config import load_config
+from agent_ctl.providers.catalog import build_providers
+
+client = GatewayClient.from_config(load_config("agent_ctl.yaml"), build_providers())
+resp = client.messages(
+    "default",
+    [{"role": "user", "content": "hello"}],
+    consumer="my-agent",
+)
+print(resp.text)
+```
+
+## OpenAI-Compatible Server
+
+By default the server binds to localhost. Pass an API token for any non-local use.
+
+```bash
+.venv/bin/agent-ctl --config agent_ctl.yaml serve --host 127.0.0.1 --port 8400 --api-token "$AGENT_CTL_API_TOKEN"
+```
+
+Then call:
+
+```bash
+curl http://127.0.0.1:8400/v1/chat/completions \
+  -H "Authorization: Bearer $AGENT_CTL_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"default","messages":[{"role":"user","content":"hi"}]}'
+```
+
+The server currently supports non-streaming chat completions. Streaming is intentionally left for v2 because chunk aggregation changes capture, cost, cache, and error semantics.
+
+## Capture Storage
+
+Captures are stored in SQLite at `db_path`. The store initializes schema metadata and indexes automatically. Request and response text are redacted before persistence, including nested content blocks and tool payloads.
+
+## Production Notes
+
+- Keep `serve` bound to `127.0.0.1` unless an auth token and network controls are in place.
+- Tool-call responses are not cached by default because they often depend on external state.
+- Retries use exponential backoff with jitter to avoid synchronized retry bursts.
+- Real-provider integration tests should be run manually with API keys and low `max_tokens`; unit tests avoid network calls.

@@ -50,8 +50,8 @@ class MemoryCache:
             if time.monotonic() > expires_at:
                 self._data.pop(key, None)
                 return None
-            return resp
+            return resp.model_copy(deep=True)
 
     def set(self, key: str, resp: NormalizedResponse, ttl_s: int) -> None:
         with self._lock:
-            self._data[key] = (time.monotonic() + ttl_s, resp)
+            self._data[key] = (time.monotonic() + ttl_s, resp.model_copy(deep=True))

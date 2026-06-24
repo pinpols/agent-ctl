@@ -64,3 +64,65 @@ def test_status_based_exception_routing():
     err503 = type("E", (Exception,), {"status_code": 503})("overloaded")
     with pytest.raises(RetriableError):
         OpenAIProvider(_FakeClient(err503)).invoke(T, REQ, timeout=5.0)
+
+
+class _ToolCallCompletions:
+    """返回一个 tool_calls 的假 OpenAI 响应,并记录收到的 kwargs。"""
+
+    def __init__(self):
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        tc = type(
+            "TC",
+            (),
+            {
+                "id": "call_1",
+                "function": type(
+                    "F", (), {"name": "diagnose", "arguments": '{"root_cause":"OOM"}'}
+                )(),
+            },
+        )()
+        msg = type("M", (), {"content": None, "tool_calls": [tc]})()
+        choice = type("C", (), {"message": msg, "finish_reason": "tool_calls"})()
+        usage = type("U", (), {"prompt_tokens": 12, "completion_tokens": 8})()
+        return type("R", (), {"choices": [choice], "usage": usage})()
+
+
+class _ToolClient:
+    def __init__(self):
+        self.chat = type("Chat", (), {"completions": _ToolCallCompletions()})()
+
+
+def test_tool_calling_anthropic_in_openai_out_anthropic_raw():
+    """ops-agent 发 Anthropic 形 tools → OpenAIProvider 翻成 OpenAI 形发出;
+    DeepSeek/OpenAI 回 tool_calls → raw 还原成 Anthropic 风格 tool_use,使消费者通用。"""
+    req = NormalizedRequest(
+        model="default",
+        messages=[{"role": "user", "content": "诊断这段日志"}],
+        max_tokens=64,
+        system="你是诊断助手",
+        tools=[
+            {
+                "name": "diagnose",
+                "description": "结构化诊断",
+                "input_schema": {"type": "object"},
+            }
+        ],
+        tool_choice={"type": "tool", "name": "diagnose"},
+    )
+    client = _ToolClient()
+    resp = OpenAIProvider(client).invoke(T, req, timeout=5.0)
+
+    # 1) 发给上游的 tools 已翻成 OpenAI function 形,tool_choice 同理
+    sent = client.chat.completions.last_kwargs
+    assert sent["tools"][0]["type"] == "function"
+    assert sent["tools"][0]["function"]["name"] == "diagnose"
+    assert sent["tool_choice"] == {"type": "function", "function": {"name": "diagnose"}}
+
+    # 2) 响应 raw 是 Anthropic 风格,含 tool_use 块 + 解析后的 input(ops-agent shim 据此还原)
+    block = next(b for b in resp.raw["content"] if b["type"] == "tool_use")
+    assert block["name"] == "diagnose"
+    assert block["input"] == {"root_cause": "OOM"}
+    assert resp.raw["stop_reason"] == "tool_use"

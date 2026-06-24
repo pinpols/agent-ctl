@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections import defaultdict, deque
+from json import JSONDecodeError
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 from agent_ctl.errors import AllTargetsFailed, GatewayError, TerminalError
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
@@ -13,19 +18,28 @@ def to_normalized(body: dict) -> NormalizedRequest:
     OpenAI 把 system 作为 messages 里 role=system 的一条;抽出首条 system 放
     NormalizedRequest.system(AnthropicProvider 需独立 system,OpenAIProvider 会再塞回)。
     """
-    messages = list(body.get("messages") or [])
+    messages = body.get("messages") or []
+    if not isinstance(messages, list):
+        raise ValueError("field 'messages' must be a list")
     system = None
     rest = []
     for m in messages:
+        if not isinstance(m, dict):
+            raise ValueError("each message must be an object")
         if m.get("role") == "system" and system is None:
             system = m.get("content")
         else:
             rest.append(m)
+    max_tokens = body.get("max_tokens") or 1024
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("field 'max_tokens' must be an integer") from exc
     return NormalizedRequest(
         model=body["model"],
         messages=rest,
         system=system,
-        max_tokens=int(body.get("max_tokens") or 1024),
+        max_tokens=max_tokens,
         temperature=body.get("temperature"),
         tools=body.get("tools"),
         tool_choice=body.get("tool_choice"),
@@ -60,7 +74,15 @@ def _error_body(message: str, err_type: str) -> dict:
     return {"error": {"message": message, "type": err_type, "code": err_type}}
 
 
-def build_server(gateway, models: list[str] | None = None, now=None):
+def build_server(
+    gateway,
+    models: list[str] | None = None,
+    now=None,
+    *,
+    api_token: str | None = None,
+    max_request_bytes: int = 1_000_000,
+    rate_limit_per_minute: int = 120,
+):
     """构造 OpenAI 兼容网关 FastAPI app。
 
     gateway: 已装配的 Gateway(注入,便于测试)。
@@ -68,11 +90,36 @@ def build_server(gateway, models: list[str] | None = None, now=None):
     now: 可注入的时间戳函数(测试用),默认 time.time。
     """
     from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
 
     clock = now or (lambda: int(time.time()))
     app = FastAPI(title="agent-ctl OpenAI-compatible gateway")
     listed = list(models or [])
+    request_times: defaultdict[str, deque[float]] = defaultdict(deque)
+
+    @app.middleware("http")
+    async def safety_middleware(request: Request, call_next):
+        auth_error = _auth_error(request, api_token)
+        if auth_error is not None:
+            return JSONResponse(status_code=401, content=auth_error)
+        length = int(request.headers.get("content-length") or 0)
+        if length > max_request_bytes:
+            return JSONResponse(
+                status_code=413,
+                content=_error_body("request too large", "request_too_large"),
+            )
+        if rate_limit_per_minute > 0:
+            client = request.client.host if request.client else "unknown"
+            now_ts = time.monotonic()
+            bucket = request_times[client]
+            while bucket and now_ts - bucket[0] > 60:
+                bucket.popleft()
+            if len(bucket) >= rate_limit_per_minute:
+                return JSONResponse(
+                    status_code=429,
+                    content=_error_body("rate limit exceeded", "rate_limit_exceeded"),
+                )
+            bucket.append(now_ts)
+        return await call_next(request)
 
     @app.get("/healthz")
     def healthz():
@@ -88,7 +135,27 @@ def build_server(gateway, models: list[str] | None = None, now=None):
         }
 
     @app.post("/v1/chat/completions")
-    def chat_completions(body: dict):
+    async def chat_completions(request: Request):
+        raw = await request.body()
+        if len(raw) > max_request_bytes:
+            return JSONResponse(
+                status_code=413,
+                content=_error_body("request too large", "request_too_large"),
+            )
+        try:
+            body = await request.json()
+        except JSONDecodeError:
+            return JSONResponse(
+                status_code=400,
+                content=_error_body("invalid JSON body", "invalid_request_error"),
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400,
+                content=_error_body(
+                    "request body must be an object", "invalid_request_error"
+                ),
+            )
         if not body.get("model"):
             return JSONResponse(
                 status_code=400,
@@ -101,7 +168,13 @@ def build_server(gateway, models: list[str] | None = None, now=None):
                     "streaming not supported yet", "invalid_request_error"
                 ),
             )
-        req = to_normalized(body)
+        try:
+            req = to_normalized(body)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content=_error_body(str(exc), "invalid_request_error"),
+            )
         try:
             resp = gateway.invoke(req)
         except TerminalError as exc:
@@ -119,3 +192,12 @@ def build_server(gateway, models: list[str] | None = None, now=None):
         return to_openai_response(resp, body["model"], clock())
 
     return app
+
+
+def _auth_error(request, api_token: str | None) -> dict | None:
+    if not api_token:
+        return None
+    expected = f"Bearer {api_token}"
+    if request.headers.get("authorization") != expected:
+        return _error_body("missing or invalid bearer token", "unauthorized")
+    return None

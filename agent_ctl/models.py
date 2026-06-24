@@ -73,3 +73,5 @@ class CallRecord(BaseModel):
     cache_key: str | None = None
     status: str = "success"  # success | fallback_success | error
     error_type: str | None = None
+    error_message_redacted: str | None = None
+    last_error: str | None = None

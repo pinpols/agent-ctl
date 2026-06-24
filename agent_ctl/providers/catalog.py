@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
+from typing import Any
 
 # provider 名 → {kind, key_env, base_url}
 PROVIDER_CATALOG: dict[str, dict] = {
@@ -35,19 +37,19 @@ PROVIDER_CATALOG: dict[str, dict] = {
 }
 
 
-def available_providers(env: dict | None = None) -> list[str]:
+def available_providers(env: Mapping[str, str] | None = None) -> list[str]:
     """目录中 api key 已在环境里设置的 provider 名(按目录顺序)。纯函数,无 SDK 依赖。"""
-    env = env if env is not None else os.environ
+    env_map = env if env is not None else os.environ
     return [
         name
         for name, c in PROVIDER_CATALOG.items()
-        if env.get(c["key_env"], "").strip()
+        if env_map.get(c["key_env"], "").strip()
     ]
 
 
 # SDK 构造抽出为可 monkeypatch 的小函数(单测不依赖真 SDK 安装)。
 def _make_anthropic(api_key: str):
-    import anthropic
+    import anthropic  # type: ignore[import-not-found]
 
     from agent_ctl.providers.anthropic_provider import AnthropicProvider
 
@@ -55,20 +57,20 @@ def _make_anthropic(api_key: str):
 
 
 def _make_openai(api_key: str, base_url: str | None):
-    from openai import OpenAI
+    from openai import OpenAI  # type: ignore[import-not-found]
 
     from agent_ctl.providers.openai_provider import OpenAIProvider
 
     return OpenAIProvider(OpenAI(api_key=api_key, base_url=base_url))
 
 
-def build_providers(env: dict | None = None) -> dict:
+def build_providers(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """按目录构造 providers 注册表;仅纳入 api key 存在的 provider。"""
-    env = env if env is not None else os.environ
-    providers: dict = {}
-    for name in available_providers(env):
+    env_map = env if env is not None else os.environ
+    providers: dict[str, Any] = {}
+    for name in available_providers(env_map):
         c = PROVIDER_CATALOG[name]
-        key = env[c["key_env"]]
+        key = env_map[c["key_env"]]
         if c["kind"] == "anthropic":
             providers[name] = _make_anthropic(key)
         else:

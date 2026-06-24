@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from agent_ctl.errors import RetriableError, TerminalError
 from agent_ctl.models import NormalizedRequest, NormalizedResponse, Target
+from agent_ctl.providers.tooltrans import (
+    anthropic_tool_choice_to_openai,
+    anthropic_tools_to_openai,
+    openai_response_to_anthropic_raw,
+)
 
 
 def classify_status(status: int) -> str:
@@ -42,10 +47,11 @@ class OpenAIProvider:
         }
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
+        # 工具:NormalizedRequest.tools/tool_choice 是规范的 Anthropic 形,翻成 OpenAI function 形再发。
         if request.tools:
-            kwargs["tools"] = request.tools
+            kwargs["tools"] = anthropic_tools_to_openai(request.tools)
         if request.tool_choice is not None:
-            kwargs["tool_choice"] = request.tool_choice
+            kwargs["tool_choice"] = anthropic_tool_choice_to_openai(request.tool_choice)
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
@@ -60,7 +66,9 @@ class OpenAIProvider:
         text = choice.message.content or ""
         tool_calls = len(getattr(choice.message, "tool_calls", None) or [])
         usage = getattr(resp, "usage", None)
-        raw = resp.model_dump(mode="json") if hasattr(resp, "model_dump") else None
+        # raw 统一成 Anthropic 风格 content(text + tool_use 块),让消费者(ops-agent shim)
+        # 对任何 provider 都能还原 tool_use —— 这是"工具调用跨 provider 通用"的关键。
+        raw = openai_response_to_anthropic_raw(choice, usage)
         return NormalizedResponse(
             text=text,
             finish_reason=getattr(choice, "finish_reason", None),

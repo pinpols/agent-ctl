@@ -13,7 +13,9 @@ from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 
 def validate_routes(
-    routes: dict[str, list[str]], providers: dict[str, Provider]
+    routes: dict[str, list[str]],
+    providers: dict[str, Provider],
+    aliases: dict[str, str] | None = None,
 ) -> list[str]:
     """每条路由目标的 provider 必须已注册。返回问题列表(空=通过)。"""
     problems: list[str] = []
@@ -28,6 +30,16 @@ def validate_routes(
                 problems.append(
                     f"route {logical!r} → {spec!r}: provider {target.provider!r} 未注册"
                 )
+    for model, spec in (aliases or {}).items():
+        try:
+            target = Target.parse(spec)
+        except ValueError as exc:
+            problems.append(f"alias {model!r}: {exc}")
+            continue
+        if target.provider not in providers:
+            problems.append(
+                f"alias {model!r} → {spec!r}: provider {target.provider!r} 未注册"
+            )
     return problems
 
 
@@ -41,7 +53,7 @@ class GatewayClient:
     def from_config(
         cls, config: Config, providers: dict[str, Provider]
     ) -> "GatewayClient":
-        problems = validate_routes(config.routes, providers)
+        problems = validate_routes(config.routes, providers, config.model_aliases)
         if problems:
             raise ValueError("路由配置校验失败:\n  - " + "\n  - ".join(problems))
         gateway = Gateway(
@@ -53,6 +65,7 @@ class GatewayClient:
             retry=config.retry,
             cache_enabled=config.cache_enabled,
             cache_ttl_s=config.cache_ttl_s,
+            cache_tool_responses=config.cache_tool_responses,
         )
         return cls(gateway)
 

@@ -76,6 +76,19 @@ def test_cache_get_set_and_miss():
     assert c.get("k").text == "cached"
 
 
+def test_cache_returns_copies_not_shared_response_instances():
+    c = MemoryCache()
+    resp = NormalizedResponse(text="cached", raw={"items": ["a"]})
+    c.set("k", resp, ttl_s=60)
+    resp.raw["items"].append("set-side")
+    cached = c.get("k")
+    assert cached is not None
+    cached.raw["items"].append("get-side")
+    cached_again = c.get("k")
+    assert cached_again is not None
+    assert cached_again.raw == {"items": ["a"]}
+
+
 def test_cache_expiry(monkeypatch):
     import agent_ctl.core.cache as mod
 

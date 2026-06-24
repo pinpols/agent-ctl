@@ -13,6 +13,8 @@ class CostMeter:
 
     def cost(self, model: str, input_tokens: int, output_tokens: int) -> float | None:
         price = self._prices.get(model)
+        if price is None and "/" in model:
+            price = self._prices.get(model.split("/", 1)[1])
         if price is None:
             log.warning("unknown model for pricing: %s (cost=None)", model)
             return None

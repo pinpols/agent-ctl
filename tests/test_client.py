@@ -25,3 +25,15 @@ def test_from_config_rejects_unregistered_provider(tmp_path):
     cfg = Config(routes={"default": ["openai/gpt"]}, db_path=str(tmp_path / "c.db"))
     with pytest.raises(ValueError, match="openai"):
         GatewayClient.from_config(cfg, providers={"fake": FakeProvider(["ok"])})
+
+
+def test_from_config_rejects_unregistered_alias_provider(tmp_path):
+    import pytest
+
+    cfg = Config(
+        routes={"default": ["fake/m"]},
+        model_aliases={"gpt": "openai/gpt"},
+        db_path=str(tmp_path / "c.db"),
+    )
+    with pytest.raises(ValueError, match="alias 'gpt'"):
+        GatewayClient.from_config(cfg, providers={"fake": FakeProvider(["ok"])})

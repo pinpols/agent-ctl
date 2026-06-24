@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 import uuid
 
@@ -39,6 +40,7 @@ class Gateway:
         retry: RetryConfig | None = None,
         cache_enabled: bool = True,
         cache_ttl_s: int = 600,
+        cache_tool_responses: bool = False,
     ) -> None:
         self._router = router
         self._providers = providers
@@ -48,6 +50,7 @@ class Gateway:
         self._retry = retry or RetryConfig()
         self._cache_enabled = cache_enabled
         self._cache_ttl_s = cache_ttl_s
+        self._cache_tool_responses = cache_tool_responses
 
         # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError
         missing = {
@@ -106,13 +109,28 @@ class Gateway:
                 )
                 last_exc = exc
                 if n < self._retry.max_attempts_per_target - 1:
-                    time.sleep(self._retry.base_backoff_s * (2**n))
+                    time.sleep(self._backoff_s(n))
         raise RetriableError(str(last_exc))
+
+    def _backoff_s(self, attempt_index: int) -> float:
+        base = self._retry.base_backoff_s * (2**attempt_index)
+        if base <= 0 or self._retry.jitter_ratio <= 0:
+            return base
+        jitter = base * self._retry.jitter_ratio
+        return max(0.0, random.uniform(base - jitter, base + jitter))
+
+    def _cache_key_for(self, request: NormalizedRequest) -> str | None:
+        if not (self._cache and self._cache_enabled):
+            return None
+        has_tool_shape = bool(request.tools or request.tool_choice)
+        if has_tool_shape and not self._cache_tool_responses:
+            return None
+        return make_key(request)
 
     def invoke(self, request: NormalizedRequest) -> NormalizedResponse:
         started = time.monotonic()
         meta = request.metadata or {}
-        cache_key = make_key(request) if (self._cache and self._cache_enabled) else None
+        cache_key = self._cache_key_for(request)
 
         if cache_key:
             cached = self._safe_cache_get(cache_key)
@@ -128,14 +146,49 @@ class Gateway:
                     cache_hit=True,
                     cache_key=cache_key,
                     error_type=None,
+                    error_message=None,
                 )
+                self._log_capture(request, meta, "success", None, None, True, started)
                 return cached
 
-        targets = self._router.resolve(request.model)
+        try:
+            targets = self._router.resolve(request.model)
+        except Exception as exc:
+            self._capture(
+                request,
+                meta,
+                started,
+                model_resolved=None,
+                attempts=[],
+                resp=None,
+                status="error",
+                cache_hit=False,
+                cache_key=cache_key,
+                error_type="routing",
+                error_message=str(exc),
+            )
+            self._log_capture(request, meta, "error", None, "routing", False, started)
+            raise GatewayError(str(exc)) from exc
         all_attempts: list[Attempt] = []  # 共享:_invoke_target 往里 append,失败也留痕
         for idx, target in enumerate(targets):
             if target.provider not in self._providers:
                 # '/'-直连到未注册 provider:抛类型化错误而非裸 KeyError
+                self._capture(
+                    request,
+                    meta,
+                    started,
+                    model_resolved=target.name,
+                    attempts=all_attempts,
+                    resp=None,
+                    status="error",
+                    cache_hit=False,
+                    cache_key=cache_key,
+                    error_type="provider",
+                    error_message=f"unregistered provider: {target.provider!r}",
+                )
+                self._log_capture(
+                    request, meta, "error", target.name, "provider", False, started
+                )
                 raise GatewayError(
                     f"unregistered provider: {target.provider!r} (model={request.model!r})"
                 )
@@ -156,9 +209,13 @@ class Gateway:
                     cache_hit=False,
                     cache_key=cache_key,
                     error_type=None,
+                    error_message=None,
+                )
+                self._log_capture(
+                    request, meta, status, target.name, None, False, started
                 )
                 return resp
-            except TerminalError:
+            except TerminalError as exc:
                 # 终态(鉴权/参数):不回退,attempts 已由 _invoke_target 记入 all_attempts
                 self._capture(
                     request,
@@ -171,6 +228,10 @@ class Gateway:
                     cache_hit=False,
                     cache_key=cache_key,
                     error_type="terminal",
+                    error_message=str(exc),
+                )
+                self._log_capture(
+                    request, meta, "error", target.name, "terminal", False, started
                 )
                 raise
             except RetriableError:
@@ -187,7 +248,9 @@ class Gateway:
             cache_hit=False,
             cache_key=cache_key,
             error_type="all_failed",
+            error_message=all_attempts[-1].error if all_attempts else None,
         )
+        self._log_capture(request, meta, "error", None, "all_failed", False, started)
         raise AllTargetsFailed(f"all targets failed for model {request.model!r}")
 
     def _safe_cache_get(self, key):
@@ -216,6 +279,7 @@ class Gateway:
         cache_hit,
         cache_key,
         error_type,
+        error_message,
     ) -> None:
         if self._store is None:
             return
@@ -224,10 +288,12 @@ class Gateway:
             if cache_hit:
                 cost = 0.0  # 命中缓存=省下真实开销
             elif resp is not None and model_resolved:
-                model_only = model_resolved.split("/", 1)[-1]
-                cost = self._cost.cost(
-                    model_only, resp.input_tokens, resp.output_tokens
-                )
+                try:
+                    cost = self._cost.cost(
+                        model_resolved, resp.input_tokens, resp.output_tokens
+                    )
+                except Exception as exc:
+                    log.warning("cost calculation failed (cost=None): %s", exc)
             rec = CallRecord(
                 id=str(uuid.uuid4()),
                 ts=time.time(),
@@ -255,7 +321,33 @@ class Gateway:
                 cache_key=cache_key,
                 status=status,
                 error_type=error_type,
+                error_message_redacted=redact(error_message) if error_message else None,
+                last_error=redact(attempts[-1].error) if attempts else None,
             )
             self._store.save(rec)
         except Exception as exc:  # fail-open:捕获绝不打断主调用
             log.warning("capture failed (fail-open): %s", exc)
+
+    def _log_capture(
+        self,
+        request: NormalizedRequest,
+        meta: dict,
+        status: str,
+        model_resolved: str | None,
+        error_type: str | None,
+        cache_hit: bool,
+        started: float,
+    ) -> None:
+        log.info(
+            "llm_call",
+            extra={
+                "trace_id": meta.get("trace_id"),
+                "consumer": meta.get("consumer", "unknown"),
+                "model_requested": request.model,
+                "model_resolved": model_resolved,
+                "status": status,
+                "error_type": error_type,
+                "cache_hit": cache_hit,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            },
+        )

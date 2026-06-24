@@ -14,9 +14,11 @@ prices:                 # [input_per_1M_usd, output_per_1M_usd]
   claude-sonnet-4-6: [3.0, 15.0]
 cache_enabled: true
 cache_ttl_s: 600
+cache_tool_responses: false
 profile: dev
 db_path: .agent_ctl/capture.db
 retry:
   max_attempts_per_target: 2
   base_backoff_s: 0.2
+  jitter_ratio: 0.2
   timeout_s: 60

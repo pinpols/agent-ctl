@@ -111,6 +111,26 @@ def test_chat_completions_missing_model_400():
     assert r.json()["error"]["type"] == "invalid_request_error"
 
 
+def test_chat_completions_malformed_messages_400():
+    c = _client(FakeGateway(resp=NormalizedResponse(text="")))
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-4o", "messages": ["bad"]},
+    )
+    assert r.status_code == 400
+    assert "message" in r.json()["error"]["message"]
+
+
+def test_chat_completions_bad_max_tokens_400():
+    c = _client(FakeGateway(resp=NormalizedResponse(text="")))
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-4o", "messages": [], "max_tokens": "abc"},
+    )
+    assert r.status_code == 400
+    assert "max_tokens" in r.json()["error"]["message"]
+
+
 def test_chat_completions_streaming_rejected():
     c = _client(FakeGateway(resp=NormalizedResponse(text="")))
     r = c.post(
@@ -131,3 +151,62 @@ def test_chat_completions_all_targets_failed_maps_502():
     c = _client(FakeGateway(exc=AllTargetsFailed("all down")))
     r = c.post("/v1/chat/completions", json={"model": "openai/gpt-4o", "messages": []})
     assert r.status_code == 502
+
+
+def test_server_requires_bearer_token_when_configured():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="secret",
+        )
+    )
+    r = c.get("/healthz")
+    assert r.status_code == 401
+    ok = c.get("/healthz", headers={"Authorization": "Bearer secret"})
+    assert ok.status_code == 200
+
+
+def test_server_rejects_large_request():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            max_request_bytes=10,
+        )
+    )
+    r = c.post(
+        "/v1/chat/completions",
+        headers={"Content-Length": "11"},
+        json={"model": "openai/gpt-4o", "messages": []},
+    )
+    assert r.status_code == 413
+
+
+def test_server_rejects_large_request_even_with_low_content_length_header():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            max_request_bytes=30,
+        )
+    )
+    body = b'{"model":"m","messages":[],"pad":"' + b"x" * 100 + b'"}'
+    r = c.post(
+        "/v1/chat/completions",
+        content=body,
+        headers={"Content-Type": "application/json", "Content-Length": "1"},
+    )
+    assert r.status_code == 413
+
+
+def test_server_rate_limits_by_client():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            rate_limit_per_minute=1,
+        )
+    )
+    assert c.get("/healthz").status_code == 200
+    assert c.get("/healthz").status_code == 429
