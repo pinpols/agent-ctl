@@ -10,7 +10,10 @@ from agent_ctl.store.sqlite_store import SqliteCaptureStore
 # KNOWN_PROVIDERS 是静态 lint 集合:仅列举 agent_ctl 当前随包附带内建适配器的 provider 名。
 # 它不是运行时接线检查——运行时权威校验由 GatewayClient.from_config 中的
 # validate_routes 负责。doctor 命令使用此集合给出"无内建适配器"的早期提示。
-KNOWN_PROVIDERS = {"anthropic"}  # 本期内建;新增 provider 时同步扩充
+KNOWN_PROVIDERS = {
+    "anthropic",
+    "openai",
+}  # 内建适配器(静态校验用);运行时以注入的 providers 为准
 
 
 def _cmd_captures(cfg, args) -> int:

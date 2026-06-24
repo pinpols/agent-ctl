@@ -41,10 +41,10 @@ def test_doctor_flags_unknown_provider(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(
         "agent_ctl.cli.load_config",
         lambda path=None: Config(
-            routes={"default": ["openai/gpt"]}, db_path=str(tmp_path / "c.db")
+            routes={"default": ["cohere/command"]}, db_path=str(tmp_path / "c.db")
         ),
     )
     rc = main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 1
-    assert "openai" in out.lower()
+    assert "cohere" in out.lower()
