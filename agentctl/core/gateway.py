@@ -1,14 +1,26 @@
 # agentctl/core/gateway.py
 from __future__ import annotations
 
+import logging
 import time
+import uuid
 
 from agentctl.config import RetryConfig
+from agentctl.core.cache import make_key
 from agentctl.core.cost import CostMeter
 from agentctl.core.router import Router
-from agentctl.errors import RetriableError, TerminalError
-from agentctl.models import Attempt, NormalizedRequest, NormalizedResponse, Target
+from agentctl.errors import AllTargetsFailed, RetriableError, TerminalError
+from agentctl.models import (
+    Attempt,
+    CallRecord,
+    NormalizedRequest,
+    NormalizedResponse,
+    Target,
+)
 from agentctl.providers.base import Provider
+from agentctl.store.redaction import redact, redact_messages
+
+log = logging.getLogger("agentctl.gateway")
 
 
 class Gateway:
@@ -80,3 +92,149 @@ class Gateway:
                 if n < self._retry.max_attempts_per_target - 1:
                     time.sleep(self._retry.base_backoff_s * (2**n))
         raise RetriableError(str(last_exc))
+
+    def invoke(self, request: NormalizedRequest) -> NormalizedResponse:
+        started = time.monotonic()
+        meta = request.metadata or {}
+        cache_key = make_key(request) if (self._cache and self._cache_enabled) else None
+
+        if cache_key:
+            cached = self._safe_cache_get(cache_key)
+            if cached is not None:
+                self._capture(
+                    request,
+                    meta,
+                    started,
+                    model_resolved=None,
+                    attempts=[],
+                    resp=cached,
+                    status="success",
+                    cache_hit=True,
+                    cache_key=cache_key,
+                    error_type=None,
+                )
+                return cached
+
+        targets = self._router.resolve(request.model)
+        all_attempts: list[Attempt] = []  # 共享:_invoke_target 往里 append,失败也留痕
+        for idx, target in enumerate(targets):
+            provider = self._providers[target.provider]
+            try:
+                resp = self._invoke_target(provider, target, request, all_attempts)
+                status = "success" if idx == 0 else "fallback_success"
+                if cache_key:
+                    self._safe_cache_set(cache_key, resp)
+                self._capture(
+                    request,
+                    meta,
+                    started,
+                    model_resolved=target.name,
+                    attempts=all_attempts,
+                    resp=resp,
+                    status=status,
+                    cache_hit=False,
+                    cache_key=cache_key,
+                    error_type=None,
+                )
+                return resp
+            except TerminalError:
+                # 终态(鉴权/参数):不回退,attempts 已由 _invoke_target 记入 all_attempts
+                self._capture(
+                    request,
+                    meta,
+                    started,
+                    model_resolved=target.name,
+                    attempts=all_attempts,
+                    resp=None,
+                    status="error",
+                    cache_hit=False,
+                    cache_key=cache_key,
+                    error_type="terminal",
+                )
+                raise
+            except RetriableError:
+                continue  # 可重试耗尽 → 回退下一目标(attempts 已记入)
+
+        self._capture(
+            request,
+            meta,
+            started,
+            model_resolved=None,
+            attempts=all_attempts,
+            resp=None,
+            status="error",
+            cache_hit=False,
+            cache_key=cache_key,
+            error_type="all_failed",
+        )
+        raise AllTargetsFailed(f"all targets failed for model {request.model!r}")
+
+    def _safe_cache_get(self, key):
+        try:
+            return self._cache.get(key)
+        except Exception as exc:  # fail-open
+            log.warning("cache get failed (fail-open): %s", exc)
+            return None
+
+    def _safe_cache_set(self, key, resp) -> None:
+        try:
+            self._cache.set(key, resp, self._cache_ttl_s)
+        except Exception as exc:
+            log.warning("cache set failed (fail-open): %s", exc)
+
+    def _capture(
+        self,
+        request,
+        meta,
+        started,
+        *,
+        model_resolved,
+        attempts,
+        resp,
+        status,
+        cache_hit,
+        cache_key,
+        error_type,
+    ) -> None:
+        if self._store is None:
+            return
+        try:
+            cost = None
+            if cache_hit:
+                cost = 0.0  # 命中缓存=省下真实开销
+            elif resp is not None and model_resolved:
+                model_only = model_resolved.split("/", 1)[-1]
+                cost = self._cost.cost(
+                    model_only, resp.input_tokens, resp.output_tokens
+                )
+            rec = CallRecord(
+                id=str(uuid.uuid4()),
+                ts=time.time(),
+                latency_ms=int((time.monotonic() - started) * 1000),
+                consumer=meta.get("consumer", "unknown"),
+                call_site=meta.get("call_site"),
+                trace_id=meta.get("trace_id"),
+                model_requested=request.model,
+                params={
+                    "max_tokens": request.max_tokens,
+                    "temperature": request.temperature,
+                    "has_tools": bool(request.tools),
+                },
+                messages_redacted=redact_messages(request.messages),
+                prompt_version=meta.get("prompt_version"),
+                model_resolved=model_resolved,
+                attempts=attempts,
+                output_redacted=redact(resp.text) if resp else None,
+                finish_reason=resp.finish_reason if resp else None,
+                tool_calls=resp.tool_calls if resp else 0,
+                input_tokens=resp.input_tokens if resp else 0,
+                output_tokens=resp.output_tokens if resp else 0,
+                cost_usd=cost,
+                cache_hit=cache_hit,
+                cache_key=cache_key,
+                status=status,
+                error_type=error_type,
+            )
+            self._store.save(rec)
+        except Exception as exc:  # fail-open:捕获绝不打断主调用
+            log.warning("capture failed (fail-open): %s", exc)
