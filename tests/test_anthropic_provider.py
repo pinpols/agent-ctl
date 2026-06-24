@@ -79,13 +79,19 @@ def test_invoke_populates_raw_when_sdk_supports_model_dump():
         usage = type("U", (), {"input_tokens": 1, "output_tokens": 2})()
 
         def model_dump(self, mode="python"):
-            return {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+            return {
+                "content": [{"type": "text", "text": "hi"}],
+                "stop_reason": "end_turn",
+            }
 
     class _Client:
         messages = type("M", (), {"create": staticmethod(lambda **k: _Msg())})()
 
     resp = AnthropicProvider(_Client()).invoke(T, REQ, timeout=5.0)
-    assert resp.raw == {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+    assert resp.raw == {
+        "content": [{"type": "text", "text": "hi"}],
+        "stop_reason": "end_turn",
+    }
 
 
 def test_classify_status():

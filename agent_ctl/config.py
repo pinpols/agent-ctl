@@ -31,6 +31,6 @@ def load_config(path: str | None = None) -> Config:
         with open(candidate, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     cfg = Config(**data)
-    if env_profile := os.getenv("AGENTCTL_PROFILE"):
+    if env_profile := os.getenv("AGENT_CTL_PROFILE"):
         cfg = cfg.model_copy(update={"profile": env_profile})
     return cfg
