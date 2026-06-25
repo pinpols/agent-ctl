@@ -13,3 +13,7 @@ class TerminalError(GatewayError):
 
 class AllTargetsFailed(GatewayError):
     """路由链全部目标耗尽。"""
+
+
+class BudgetExceeded(GatewayError):
+    """成本预算闸:consumer/全局已达上限,调用前短路(不产生真实开销)。"""

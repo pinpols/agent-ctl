@@ -8,7 +8,12 @@ from json import JSONDecodeError
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from agent_ctl.errors import AllTargetsFailed, GatewayError, TerminalError
+from agent_ctl.errors import (
+    AllTargetsFailed,
+    BudgetExceeded,
+    GatewayError,
+    TerminalError,
+)
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
 
 
@@ -227,6 +232,10 @@ def build_server(
             return JSONResponse(
                 status_code=400, content=_error_body(str(exc), "terminal_error")
             )
+        except BudgetExceeded as exc:
+            return JSONResponse(
+                status_code=402, content=_error_body(str(exc), "budget_exceeded")
+            )
         except AllTargetsFailed as exc:
             return JSONResponse(
                 status_code=502, content=_error_body(str(exc), "upstream_error")
@@ -285,6 +294,10 @@ def build_server(
         except TerminalError as exc:
             return JSONResponse(
                 status_code=400, content=_error_body(str(exc), "terminal_error")
+            )
+        except BudgetExceeded as exc:
+            return JSONResponse(
+                status_code=402, content=_error_body(str(exc), "budget_exceeded")
             )
         except AllTargetsFailed as exc:
             return JSONResponse(

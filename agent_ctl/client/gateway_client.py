@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from agent_ctl.config import Config
+from agent_ctl.core.budget import BudgetGuard
 from agent_ctl.core.cache import MemoryCache
 from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
@@ -73,6 +74,7 @@ class GatewayClient:
                 config.circuit_failure_threshold, config.circuit_cooldown_s
             ),
             request_deadline_s=config.request_deadline_s,
+            budget=BudgetGuard(config.budgets, config.budget_global),
         )
         return cls(gateway)
 

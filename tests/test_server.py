@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from agent_ctl.errors import AllTargetsFailed, TerminalError
+from agent_ctl.errors import AllTargetsFailed, BudgetExceeded, TerminalError
 from agent_ctl.models import EmbeddingResponse, NormalizedRequest, NormalizedResponse
 from agent_ctl.server.app import build_server, to_normalized, to_openai_response
 
@@ -241,6 +241,13 @@ def test_chat_completions_all_targets_failed_maps_502():
     c = _client(FakeGateway(exc=AllTargetsFailed("all down")))
     r = c.post("/v1/chat/completions", json={"model": "openai/gpt-4o", "messages": []})
     assert r.status_code == 502
+
+
+def test_chat_completions_budget_exceeded_maps_402():
+    c = _client(FakeGateway(exc=BudgetExceeded("budget exhausted")))
+    r = c.post("/v1/chat/completions", json={"model": "openai/gpt-4o", "messages": []})
+    assert r.status_code == 402
+    assert r.json()["error"]["type"] == "budget_exceeded"
 
 
 def test_server_requires_bearer_token_when_configured():

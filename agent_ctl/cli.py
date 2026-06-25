@@ -81,6 +81,7 @@ def _cmd_serve(cfg, args) -> int:
     """起 OpenAI 兼容网关:按目录构造 providers(仅有 key 的)+ Gateway + FastAPI server。"""
     import uvicorn
 
+    from agent_ctl.core.budget import BudgetGuard
     from agent_ctl.core.cache import MemoryCache
     from agent_ctl.core.circuit import CircuitBreaker
     from agent_ctl.core.cost import CostMeter
@@ -114,6 +115,7 @@ def _cmd_serve(cfg, args) -> int:
         cache_tool_responses=cfg.cache_tool_responses,
         circuit=CircuitBreaker(cfg.circuit_failure_threshold, cfg.circuit_cooldown_s),
         request_deadline_s=cfg.request_deadline_s,
+        budget=BudgetGuard(cfg.budgets, cfg.budget_global),
     )
     app = build_server(
         gateway,

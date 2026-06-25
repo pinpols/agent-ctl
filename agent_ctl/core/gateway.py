@@ -7,12 +7,14 @@ import time
 import uuid
 
 from agent_ctl.config import RetryConfig
+from agent_ctl.core.budget import BudgetGuard
 from agent_ctl.core.cache import make_key
 from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.router import Router
 from agent_ctl.errors import (
     AllTargetsFailed,
+    BudgetExceeded,
     GatewayError,
     RetriableError,
     TerminalError,
@@ -46,6 +48,7 @@ class Gateway:
         cache_tool_responses: bool = False,
         circuit: CircuitBreaker | None = None,
         request_deadline_s: float = 0.0,
+        budget: BudgetGuard | None = None,
     ) -> None:
         self._router = router
         self._providers = providers
@@ -58,6 +61,7 @@ class Gateway:
         self._cache_tool_responses = cache_tool_responses
         self._circuit = circuit or CircuitBreaker(failure_threshold=0)  # 默认关闭
         self._deadline_s = request_deadline_s  # 单次调用墙钟总预算;0=不封顶
+        self._budget = budget or BudgetGuard()  # 默认空=不限
 
         # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError。
         # 只校验 routes(必经);aliases 是可选项(共享配置里可能含本消费者没 key 的 provider),
@@ -179,6 +183,26 @@ class Gateway:
                 )
                 self._log_capture(request, meta, "success", None, None, True, started)
                 return cached
+
+        # 预算闸:已超上限 → 打 provider 前短路(缓存命中走免费路径不受此限)
+        try:
+            self._budget.check(meta.get("consumer", "unknown"))
+        except BudgetExceeded as exc:
+            self._capture(
+                request,
+                meta,
+                started,
+                model_resolved=None,
+                attempts=[],
+                resp=None,
+                status="error",
+                cache_hit=False,
+                cache_key=cache_key,
+                error_type="budget",
+                error_message=str(exc),
+            )
+            self._log_capture(request, meta, "error", None, "budget", False, started)
+            raise
 
         try:
             targets = self._router.resolve(request.model)
@@ -323,6 +347,13 @@ class Gateway:
         started = time.monotonic()
         meta = metadata or {}
         try:
+            self._budget.check(meta.get("consumer", "unknown"))
+        except BudgetExceeded as exc:
+            self._capture_embed(
+                model, meta, started, None, [], None, "error", "budget", str(exc)
+            )
+            raise
+        try:
             targets = self._router.resolve(model)
         except Exception as exc:
             self._capture_embed(
@@ -464,6 +495,7 @@ class Gateway:
                 cost = self._cost.cost(model_resolved, input_tokens, 0)
             except Exception as exc:
                 log.warning("embed cost calculation failed (cost=None): %s", exc)
+        self._budget.add(meta.get("consumer", "unknown"), cost)
         metrics.record_call(
             model_resolved=model_resolved,
             status=status,
@@ -538,6 +570,8 @@ class Gateway:
                 )
             except Exception as exc:
                 log.warning("cost calculation failed (cost=None): %s", exc)
+        # 实际成本计入预算累计(None/0 自动忽略)
+        self._budget.add(meta.get("consumer", "unknown"), cost)
         # 指标:无论是否落库都上报(Prometheus,未装则 no-op)
         metrics.record_call(
             model_resolved=model_resolved,
