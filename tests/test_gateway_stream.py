@@ -22,11 +22,14 @@ REQ = NormalizedRequest(
 class FakeStreamProvider:
     """带 stream 能力:start_error 在开流前抛(可回退);mid_error 在产出首块后抛。"""
 
-    def __init__(self, parts, start_error=None, mid_error=None, it=10, ot=5):
+    def __init__(
+        self, parts, start_error=None, mid_error=None, it=10, ot=5, tool_calls=None
+    ):
         self._parts = parts
         self._start_error = start_error
         self._mid_error = mid_error
         self._it, self._ot = it, ot
+        self._tool_calls = tool_calls
         self.calls = 0
 
     def invoke(self, target, request, timeout):
@@ -42,9 +45,10 @@ class FakeStreamProvider:
             yield StreamChunk(text=p)
         yield StreamChunk(
             done=True,
-            finish_reason="stop",
+            finish_reason="tool_calls" if self._tool_calls else "stop",
             input_tokens=self._it,
             output_tokens=self._ot,
+            tool_calls=self._tool_calls,
         )
 
 
@@ -144,6 +148,36 @@ def test_stream_mid_failure_charges_circuit_and_can_open(tmp_path):
         with pytest.raises(Exception):
             list(gw.invoke_stream(REQ))  # 每次:出首块 "a" 后中途失败 → record_failure
     assert cb.allow("s") is False  # 两次中途失败累计 → 开路(此前会"开流即成功"永不开路)
+
+
+def test_stream_client_abort_captures_aborted_record(tmp_path):
+    """G3:客户端中途断流(gen.close → GeneratorExit)落 aborted 记录(按已累计)。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = FakeStreamProvider(["a", "b", "c"])
+    gw = _gw({"s": p}, {"default": ["s/m"]}, store)
+    gen = gw.invoke_stream(REQ)
+    first = next(gen)  # 拿首块 "a"
+    assert first.text == "a"
+    gen.close()  # 模拟客户端断开 → GeneratorExit 注入
+    rec = store.list_recent(1)[0]
+    assert rec.status == "aborted"
+    assert rec.error_type == "client_abort"
+    assert rec.output_redacted == "a"  # 已累计的部分文本仍落库
+
+
+def test_stream_tool_calls_surfaced_and_captured(tmp_path):
+    """G5:流式工具调用经末块 tool_calls 透出,捕获记录 tool_calls 计数。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = FakeStreamProvider(
+        [],
+        tool_calls=[{"id": "c1", "name": "diagnose", "arguments": '{"x":1}'}],
+    )
+    gw = _gw({"s": p}, {"default": ["s/m"]}, store)
+    chunks = list(gw.invoke_stream(REQ))
+    done = [c for c in chunks if c.done][-1]
+    assert done.tool_calls == [{"id": "c1", "name": "diagnose", "arguments": '{"x":1}'}]
+    rec = store.list_recent(1)[0]
+    assert rec.tool_calls == 1  # 捕获记录工具调用数(此前流式恒为 0)
 
 
 def test_stream_open_circuit_skips_provider(tmp_path):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from json import JSONDecodeError
 
 from fastapi import Request
@@ -118,6 +118,24 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
             continue
         if chunk.done:
             final_fr = chunk.finish_reason or "stop"
+            if chunk.tool_calls:
+                # 工具调用合并为一帧下发(OpenAI 形;客户端可正常重组)
+                yield frame(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": i,
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": tc["arguments"],
+                                },
+                            }
+                            for i, tc in enumerate(chunk.tool_calls)
+                        ]
+                    }
+                )
         elif chunk.text:
             yield frame({"content": chunk.text})
     yield frame({}, finish_reason=final_fr)
@@ -165,7 +183,10 @@ def build_server(
     clock = now or (lambda: int(time.time()))
     app = FastAPI(title="agent-ctl OpenAI-compatible gateway")
     listed = list(models or [])
-    request_times: defaultdict[str, deque[float]] = defaultdict(deque)
+    # LRU 有界:仅按时间裁剪每个 bucket 不清理空闲 IP 的 key → 公网多 IP 会无界增长。
+    # 用 OrderedDict 钉住被追踪客户端数,超界淘汰最久未见的 IP。
+    request_buckets: OrderedDict[str, deque[float]] = OrderedDict()
+    max_clients = 10_000
 
     @app.middleware("http")
     async def safety_middleware(request: Request, call_next):
@@ -181,7 +202,11 @@ def build_server(
         if rate_limit_per_minute > 0:
             client = request.client.host if request.client else "unknown"
             now_ts = time.monotonic()
-            bucket = request_times[client]
+            bucket = request_buckets.get(client)
+            if bucket is None:
+                bucket = deque()
+                request_buckets[client] = bucket
+            request_buckets.move_to_end(client)  # 最近见过
             while bucket and now_ts - bucket[0] > 60:
                 bucket.popleft()
             if len(bucket) >= rate_limit_per_minute:
@@ -190,6 +215,8 @@ def build_server(
                     content=_error_body("rate limit exceeded", "rate_limit_exceeded"),
                 )
             bucket.append(now_ts)
+            while len(request_buckets) > max_clients:
+                request_buckets.popitem(last=False)  # 淘汰最久未见的客户端
         return await call_next(request)
 
     @app.get("/healthz")

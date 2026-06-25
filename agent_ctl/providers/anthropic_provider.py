@@ -101,17 +101,32 @@ class AnthropicProvider:
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
+        # 工具调用:content_block_start 给 id/name,input_json_delta 分片拼 arguments(按 index)。
+        tool_frags: dict[int, dict] = {}
         for ev in events:
             etype = getattr(ev, "type", None)
             if etype == "message_start":
                 usage = getattr(getattr(ev, "message", None), "usage", None)
                 input_tokens = getattr(usage, "input_tokens", 0) or 0
+            elif etype == "content_block_start":
+                block = getattr(ev, "content_block", None)
+                if getattr(block, "type", None) == "tool_use":
+                    tool_frags[getattr(ev, "index", 0) or 0] = {
+                        "id": getattr(block, "id", "") or "",
+                        "name": getattr(block, "name", "") or "",
+                        "args": "",
+                    }
             elif etype == "content_block_delta":
                 delta = getattr(ev, "delta", None)
-                if getattr(delta, "type", None) == "text_delta":
+                dtype = getattr(delta, "type", None)
+                if dtype == "text_delta":
                     text = getattr(delta, "text", "") or ""
                     if text:
                         yield StreamChunk(text=text)
+                elif dtype == "input_json_delta":
+                    frag = tool_frags.get(getattr(ev, "index", 0) or 0)
+                    if frag is not None:
+                        frag["args"] += getattr(delta, "partial_json", "") or ""
             elif etype == "message_delta":
                 delta = getattr(ev, "delta", None)
                 fr = getattr(delta, "stop_reason", None)
@@ -120,9 +135,14 @@ class AnthropicProvider:
                 usage = getattr(ev, "usage", None)
                 if usage:
                     output_tokens = getattr(usage, "output_tokens", 0) or output_tokens
+        tool_calls = [
+            {"id": f["id"], "name": f["name"], "arguments": f["args"]}
+            for _, f in sorted(tool_frags.items())
+        ] or None
         yield StreamChunk(
             done=True,
             finish_reason=finish_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            tool_calls=tool_calls,
         )

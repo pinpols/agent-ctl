@@ -118,6 +118,8 @@ class OpenAIProvider:
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
+        # 工具调用以分片到达(按 index,arguments 跨 chunk 拼接)→ 重组,勿丢。
+        tool_frags: dict[int, dict] = {}
         for chunk in resp:
             choices = getattr(chunk, "choices", None) or []
             if choices:
@@ -128,15 +130,33 @@ class OpenAIProvider:
                     finish_reason = fr
                 if content:
                     yield StreamChunk(text=content)
+                for tc in (getattr(delta, "tool_calls", None) or []) if delta else []:
+                    idx = getattr(tc, "index", 0) or 0
+                    frag = tool_frags.setdefault(
+                        idx, {"id": "", "name": "", "args": ""}
+                    )
+                    if getattr(tc, "id", None):
+                        frag["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        if getattr(fn, "name", None):
+                            frag["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            frag["args"] += fn.arguments
             usage = getattr(chunk, "usage", None)
             if usage:
                 input_tokens = getattr(usage, "prompt_tokens", 0) or 0
                 output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        tool_calls = [
+            {"id": f["id"], "name": f["name"], "arguments": f["args"]}
+            for _, f in sorted(tool_frags.items())
+        ] or None
         yield StreamChunk(
             done=True,
             finish_reason=finish_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            tool_calls=tool_calls,
         )
 
     def embed(

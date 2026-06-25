@@ -194,6 +194,43 @@ def test_stream_connect_error_is_typed():
         list(OpenAIProvider(_BoomClient()).stream(T, REQ, timeout=5.0))
 
 
+class _ToolStreamCompletions:
+    """流式工具调用:tool_calls 分片到达(id+name 在首片,arguments 跨片拼接)。"""
+
+    def create(self, **kwargs):
+        def _tc(index, id=None, name=None, args=None):
+            fn = type("F", (), {"name": name, "arguments": args})()
+            return type("TC", (), {"index": index, "id": id, "function": fn})()
+
+        def _chunk(tool_calls, fr=None, usage=None):
+            delta = type("D", (), {"content": None, "tool_calls": tool_calls})()
+            ch = type("Ch", (), {"delta": delta, "finish_reason": fr})()
+            return type("K", (), {"choices": [ch], "usage": usage})()
+
+        usage = type("U", (), {"prompt_tokens": 12, "completion_tokens": 8})()
+        return iter(
+            [
+                _chunk([_tc(0, id="call_1", name="diagnose", args='{"root')]),
+                _chunk([_tc(0, args='_cause":"OOM"}')], fr="tool_calls"),
+                type("K", (), {"choices": [], "usage": usage})(),
+            ]
+        )
+
+
+def test_stream_reassembles_fragmented_tool_calls():
+    client = type(
+        "C", (), {"chat": type("Chat", (), {"completions": _ToolStreamCompletions()})()}
+    )()
+    chunks = list(OpenAIProvider(client).stream(T, REQ, timeout=5.0))
+    done = chunks[-1]
+    assert done.done
+    assert done.tool_calls == [
+        {"id": "call_1", "name": "diagnose", "arguments": '{"root_cause":"OOM"}'}
+    ]
+    assert done.finish_reason == "tool_calls"
+    assert done.output_tokens == 8
+
+
 def test_tool_calling_anthropic_in_openai_out_anthropic_raw():
     """ops-agent 发 Anthropic 形 tools → OpenAIProvider 翻成 OpenAI 形发出;
     DeepSeek/OpenAI 回 tool_calls → raw 还原成 Anthropic 风格 tool_use,使消费者通用。"""

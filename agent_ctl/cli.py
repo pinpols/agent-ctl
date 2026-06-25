@@ -108,7 +108,7 @@ def _cmd_serve(cfg, args) -> int:
         providers=providers,
         cost_meter=CostMeter(cfg.prices),
         store=build_store(cfg),
-        cache=MemoryCache() if cfg.cache_enabled else None,
+        cache=MemoryCache(cfg.cache_max_entries) if cfg.cache_enabled else None,
         retry=cfg.retry,
         cache_enabled=cfg.cache_enabled,
         cache_ttl_s=cfg.cache_ttl_s,

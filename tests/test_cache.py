@@ -89,6 +89,26 @@ def test_cache_returns_copies_not_shared_response_instances():
     assert cached_again.raw == {"items": ["a"]}
 
 
+def test_cache_lru_evicts_when_over_max_entries():
+    """G1:超过 max_entries 时淘汰最久未用,字典不无界增长。"""
+    c = MemoryCache(max_entries=3)
+    for k in ("a", "b", "c"):
+        c.set(k, NormalizedResponse(text=k), ttl_s=60)
+    c.get("a")  # 触碰 a → a 变最近用,最旧变 b
+    c.set("d", NormalizedResponse(text="d"), ttl_s=60)  # 超界 → 淘汰 b
+    assert len(c) == 3
+    assert c.get("b") is None  # 最久未用被淘汰
+    assert c.get("a").text == "a"  # 被触碰过 → 留存
+    assert c.get("d").text == "d"
+
+
+def test_cache_unbounded_when_max_zero():
+    c = MemoryCache(max_entries=0)
+    for i in range(50):
+        c.set(f"k{i}", NormalizedResponse(text=str(i)), ttl_s=60)
+    assert len(c) == 50  # 0=不限
+
+
 def test_cache_expiry(monkeypatch):
     import agent_ctl.core.cache as mod
 

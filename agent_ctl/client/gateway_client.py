@@ -65,7 +65,9 @@ class GatewayClient:
             providers=providers,
             cost_meter=CostMeter(config.prices),
             store=build_store(config),
-            cache=MemoryCache() if config.cache_enabled else None,
+            cache=MemoryCache(config.cache_max_entries)
+            if config.cache_enabled
+            else None,
             retry=config.retry,
             cache_enabled=config.cache_enabled,
             cache_ttl_s=config.cache_ttl_s,

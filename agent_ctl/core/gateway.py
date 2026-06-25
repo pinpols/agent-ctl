@@ -157,7 +157,8 @@ class Gateway:
         return max(0.0, random.uniform(base - jitter, base + jitter))
 
     def _cache_key_for(self, request: NormalizedRequest) -> str | None:
-        if not (self._cache and self._cache_enabled):
+        # 用 is None 而非真值判断:MemoryCache 实现了 __len__,空缓存真值为 False 会误判"无缓存"。
+        if self._cache is None or not self._cache_enabled:
             return None
         has_tool_shape = bool(request.tools or request.tool_choice)
         if has_tool_shape and not self._cache_tool_responses:
@@ -452,6 +453,7 @@ class Gateway:
             parts: list[str] = []
             fr: str | None = None
             it = ot = 0
+            tcs: list | None = None
             try:
                 for chunk in itertools.chain([] if first is None else [first], gen):
                     if chunk is None:
@@ -462,6 +464,7 @@ class Gateway:
                             chunk.input_tokens,
                             chunk.output_tokens,
                         )
+                        tcs = chunk.tool_calls
                     elif chunk.text:
                         parts.append(chunk.text)
                         yield chunk
@@ -472,6 +475,40 @@ class Gateway:
                     request, meta, started, attempts, "stream", str(exc), target.name
                 )
                 raise GatewayError(str(exc)) from exc
+            except BaseException:
+                # 客户端中途断流(GeneratorExit/取消):落 aborted 记录(按已累计),
+                # 不计熔断(非 provider 故障),原样重抛(生成器必须传播 GeneratorExit)。
+                attempts.append(
+                    self._attempt(target, "aborted", t0, "client disconnected")
+                )
+                self._capture(
+                    request,
+                    meta,
+                    started,
+                    model_resolved=target.name,
+                    attempts=attempts,
+                    resp=NormalizedResponse(
+                        text="".join(parts),
+                        finish_reason=fr,
+                        input_tokens=it,
+                        output_tokens=ot,
+                    ),
+                    status="aborted",
+                    cache_hit=False,
+                    cache_key=None,
+                    error_type="client_abort",
+                    error_message=None,
+                )
+                self._log_capture(
+                    request,
+                    meta,
+                    "aborted",
+                    target.name,
+                    "client_abort",
+                    False,
+                    started,
+                )
+                raise
             self._circuit.record_success(target.provider)
             attempts.append(self._attempt(target, "success", t0, None))
             resp = NormalizedResponse(
@@ -479,10 +516,15 @@ class Gateway:
                 finish_reason=fr,
                 input_tokens=it,
                 output_tokens=ot,
+                tool_calls=len(tcs or []),
             )
             self._capture_stream_ok(request, meta, started, target, attempts, resp, idx)
             yield StreamChunk(
-                done=True, finish_reason=fr, input_tokens=it, output_tokens=ot
+                done=True,
+                finish_reason=fr,
+                input_tokens=it,
+                output_tokens=ot,
+                tool_calls=tcs,
             )
             return
 

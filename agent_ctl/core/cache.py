@@ -5,6 +5,7 @@ import hashlib
 import json
 import threading
 import time
+from collections import OrderedDict
 from typing import Protocol
 
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
@@ -35,10 +36,16 @@ class Cache(Protocol):
 
 
 class MemoryCache:
-    """进程内精确匹配缓存 + TTL。加锁保证多线程并发调用安全。"""
+    """进程内精确匹配缓存 + TTL,**有界 LRU**。加锁保证多线程并发调用安全。
 
-    def __init__(self) -> None:
-        self._data: dict[str, tuple[float, NormalizedResponse]] = {}
+    max_entries 硬上界 + 最久未用淘汰:LLM 请求 key 高度发散(过期项几乎不会被再次
+    命中而惰性删除),无界字典会在长驻 server 里只增不减。set 时超界即从最旧端淘汰,
+    O(1) 摊还,内存被钉死在 max_entries。
+    """
+
+    def __init__(self, max_entries: int = 10_000) -> None:
+        self._data: OrderedDict[str, tuple[float, NormalizedResponse]] = OrderedDict()
+        self._max = max_entries
         self._lock = threading.Lock()
 
     def get(self, key: str) -> NormalizedResponse | None:
@@ -50,8 +57,16 @@ class MemoryCache:
             if time.monotonic() > expires_at:
                 self._data.pop(key, None)
                 return None
+            self._data.move_to_end(key)  # LRU:命中即"最近用"
             return resp.model_copy(deep=True)
 
     def set(self, key: str, resp: NormalizedResponse, ttl_s: int) -> None:
         with self._lock:
             self._data[key] = (time.monotonic() + ttl_s, resp.model_copy(deep=True))
+            self._data.move_to_end(key)
+            while self._max > 0 and len(self._data) > self._max:
+                self._data.popitem(last=False)  # 淘汰最久未用
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)

@@ -21,6 +21,7 @@ class FakeGateway:
         embed_exc=None,
         stream_chunks=None,
         stream_exc=None,
+        stream_tool_calls=None,
     ):
         self._resp = resp
         self._exc = exc
@@ -28,6 +29,7 @@ class FakeGateway:
         self._embed_exc = embed_exc
         self._stream_chunks = stream_chunks  # list[str] 文本增量
         self._stream_exc = stream_exc
+        self._stream_tool_calls = stream_tool_calls
         self.last_request = None
         self.last_embed = None
 
@@ -50,6 +52,7 @@ class FakeGateway:
             finish_reason=(r.finish_reason if r else None),
             input_tokens=(r.input_tokens if r else 0),
             output_tokens=(r.output_tokens if r else 0),
+            tool_calls=self._stream_tool_calls,
         )
 
     def embed(self, model, inputs, metadata=None) -> EmbeddingResponse:
@@ -214,6 +217,30 @@ def test_streaming_budget_error_maps_402():
         json={"model": "openai/gpt-4o", "messages": [], "stream": True},
     )
     assert r.status_code == 402
+
+
+def test_streaming_emits_tool_calls_frame():
+    """G5:末块带 tool_calls → SSE 下发 OpenAI 形 tool_calls 帧 + finish_reason=tool_calls。"""
+    gw = FakeGateway(
+        resp=NormalizedResponse(text="", finish_reason="tool_calls"),
+        stream_chunks=[],
+        stream_tool_calls=[{"id": "c1", "name": "diagnose", "arguments": '{"x":1}'}],
+    )
+    c = _client(gw)
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "诊断"}],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    text = r.text
+    assert '"tool_calls"' in text
+    assert '"name": "diagnose"' in text
+    assert '"finish_reason": "tool_calls"' in text
+    assert text.rstrip().endswith("data: [DONE]")
 
 
 # ── /v1/embeddings ──────────────────────────────────────────

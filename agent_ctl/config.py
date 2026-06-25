@@ -22,6 +22,8 @@ class Config(BaseModel):
     cache_enabled: bool = True
     cache_ttl_s: int = 600
     cache_tool_responses: bool = False
+    # 缓存条目硬上界(LRU 淘汰),防长驻 server 内存只增不减。0=不限(不建议)。
+    cache_max_entries: int = 10_000
     # 捕获落库移出请求主路径(后台线程 + 有界队列)。关闭则同步落库(测试/确定性可读)。
     capture_async: bool = True
     # 单次调用墙钟总预算(秒);跨"重试×回退×单目标超时"封顶,0=不封顶。

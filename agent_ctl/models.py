@@ -43,13 +43,15 @@ class NormalizedResponse(BaseModel):
 
 
 class StreamChunk(BaseModel):
-    """流式增量。text=本次增量文本;done=True 的终块携带 finish_reason + 最终 token 计量。"""
+    """流式增量。text=本次增量文本;done=True 的终块携带 finish_reason + 最终 token 计量,
+    并在涉及工具调用时携带 tool_calls=[{id,name,arguments}](已从分片重组的完整工具调用)。"""
 
     text: str = ""
     finish_reason: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     done: bool = False
+    tool_calls: list | None = None
 
 
 class EmbeddingResponse(BaseModel):
