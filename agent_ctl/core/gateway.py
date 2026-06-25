@@ -5,12 +5,12 @@ import itertools
 import logging
 import random
 import time
-import uuid
 from collections.abc import Iterator
 
 from agent_ctl.config import RetryConfig
 from agent_ctl.core.budget import BudgetGuard
 from agent_ctl.core.cache import make_key
+from agent_ctl.core.capture import Capturer
 from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.router import Router
@@ -24,16 +24,13 @@ from agent_ctl.errors import (
 )
 from agent_ctl.models import (
     Attempt,
-    CallRecord,
     EmbeddingResponse,
     NormalizedRequest,
     NormalizedResponse,
     StreamChunk,
     Target,
 )
-from agent_ctl.obs import metrics
 from agent_ctl.providers.base import Provider
-from agent_ctl.store.redaction import redact, redact_messages
 
 log = logging.getLogger("agent_ctl.gateway")
 
@@ -56,8 +53,6 @@ class Gateway:
     ) -> None:
         self._router = router
         self._providers = providers
-        self._cost = cost_meter
-        self._store = store
         self._cache = cache
         self._retry = retry or RetryConfig()
         self._cache_enabled = cache_enabled
@@ -66,6 +61,8 @@ class Gateway:
         self._circuit = circuit or CircuitBreaker(failure_threshold=0)  # 默认关闭
         self._deadline_s = request_deadline_s  # 单次调用墙钟总预算;0=不封顶
         self._budget = budget or BudgetGuard()  # 默认空=不限
+        # Capturer 与 Gateway 必须共享同一 BudgetGuard 实例(check 在网关、add 在捕获)
+        self._capturer = Capturer(cost_meter, store, self._budget)
 
         # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError。
         # 只校验 routes(必经);aliases 是可选项(共享配置里可能含本消费者没 key 的 provider),
@@ -173,7 +170,7 @@ class Gateway:
         if cache_key:
             cached = self._safe_cache_get(cache_key)
             if cached is not None:
-                self._capture(
+                self._capturer.record(
                     request,
                     meta,
                     started,
@@ -186,14 +183,14 @@ class Gateway:
                     error_type=None,
                     error_message=None,
                 )
-                self._log_capture(request, meta, "success", None, None, True, started)
+                self._capturer.log(request, meta, "success", None, None, True, started)
                 return cached
 
         # 预算闸:已超上限 → 打 provider 前短路(缓存命中走免费路径不受此限)
         try:
             self._budget.check(meta.get("consumer", "unknown"))
         except BudgetExceeded as exc:
-            self._capture(
+            self._capturer.record(
                 request,
                 meta,
                 started,
@@ -206,13 +203,13 @@ class Gateway:
                 error_type="budget",
                 error_message=str(exc),
             )
-            self._log_capture(request, meta, "error", None, "budget", False, started)
+            self._capturer.log(request, meta, "error", None, "budget", False, started)
             raise
 
         try:
             targets = self._router.resolve(request.model)
         except Exception as exc:
-            self._capture(
+            self._capturer.record(
                 request,
                 meta,
                 started,
@@ -225,7 +222,7 @@ class Gateway:
                 error_type="routing",
                 error_message=str(exc),
             )
-            self._log_capture(request, meta, "error", None, "routing", False, started)
+            self._capturer.log(request, meta, "error", None, "routing", False, started)
             raise GatewayError(str(exc)) from exc
         all_attempts: list[Attempt] = []  # 共享:_invoke_target 往里 append,失败也留痕
         deadline = self._deadline_for(started)
@@ -234,7 +231,7 @@ class Gateway:
                 break
             if target.provider not in self._providers:
                 # '/'-直连到未注册 provider:抛类型化错误而非裸 KeyError
-                self._capture(
+                self._capturer.record(
                     request,
                     meta,
                     started,
@@ -247,7 +244,7 @@ class Gateway:
                     error_type="provider",
                     error_message=f"unregistered provider: {target.provider!r}",
                 )
-                self._log_capture(
+                self._capturer.log(
                     request, meta, "error", target.name, "provider", False, started
                 )
                 raise GatewayError(
@@ -264,7 +261,7 @@ class Gateway:
                 status = "success" if idx == 0 else "fallback_success"
                 if cache_key:
                     self._safe_cache_set(cache_key, resp)
-                self._capture(
+                self._capturer.record(
                     request,
                     meta,
                     started,
@@ -277,14 +274,14 @@ class Gateway:
                     error_type=None,
                     error_message=None,
                 )
-                self._log_capture(
+                self._capturer.log(
                     request, meta, status, target.name, None, False, started
                 )
                 return resp
             except TerminalError as exc:
                 # 终态(鉴权/参数/欠费):计入熔断(持续 4xx 应短路该 provider),但不回退
                 self._circuit.record_failure(target.provider)
-                self._capture(
+                self._capturer.record(
                     request,
                     meta,
                     started,
@@ -297,7 +294,7 @@ class Gateway:
                     error_type="terminal",
                     error_message=str(exc),
                 )
-                self._log_capture(
+                self._capturer.log(
                     request, meta, "error", target.name, "terminal", False, started
                 )
                 raise
@@ -307,7 +304,7 @@ class Gateway:
                 self._circuit.record_failure(target.provider)
                 continue  # 可重试耗尽 → 回退下一目标(attempts 已记入)
 
-        self._capture(
+        self._capturer.record(
             request,
             meta,
             started,
@@ -320,7 +317,7 @@ class Gateway:
             error_type="all_failed",
             error_message=all_attempts[-1].error if all_attempts else None,
         )
-        self._log_capture(request, meta, "error", None, "all_failed", False, started)
+        self._capturer.log(request, meta, "error", None, "all_failed", False, started)
         raise AllTargetsFailed(f"all targets failed for model {request.model!r}")
 
     def invoke_stream(self, request: NormalizedRequest) -> Iterator[StreamChunk]:
@@ -455,7 +452,7 @@ class Gateway:
                 attempts.append(
                     self._attempt(target, "aborted", t0, "client disconnected")
                 )
-                self._capture(
+                self._capturer.record(
                     request,
                     meta,
                     started,
@@ -473,7 +470,7 @@ class Gateway:
                     error_type="client_abort",
                     error_message=None,
                 )
-                self._log_capture(
+                self._capturer.log(
                     request,
                     meta,
                     "aborted",
@@ -557,7 +554,7 @@ class Gateway:
 
     def _capture_stream_ok(self, request, meta, started, target, attempts, resp, idx):
         status = "success" if idx == 0 else "fallback_success"
-        self._capture(
+        self._capturer.record(
             request,
             meta,
             started,
@@ -570,7 +567,7 @@ class Gateway:
             error_type=None,
             error_message=None,
         )
-        self._log_capture(request, meta, status, target.name, None, False, started)
+        self._capturer.log(request, meta, status, target.name, None, False, started)
 
     def _capture_stream_error(
         self,
@@ -582,7 +579,7 @@ class Gateway:
         error_message,
         model_resolved=None,
     ):
-        self._capture(
+        self._capturer.record(
             request,
             meta,
             started,
@@ -595,7 +592,7 @@ class Gateway:
             error_type=error_type,
             error_message=error_message,
         )
-        self._log_capture(
+        self._capturer.log(
             request, meta, "error", model_resolved, error_type, False, started
         )
 
@@ -612,14 +609,14 @@ class Gateway:
         try:
             self._budget.check(meta.get("consumer", "unknown"))
         except BudgetExceeded as exc:
-            self._capture_embed(
+            self._capturer.record_embed(
                 model, meta, started, None, [], None, "error", "budget", str(exc)
             )
             raise
         try:
             targets = self._router.resolve(model)
         except Exception as exc:
-            self._capture_embed(
+            self._capturer.record_embed(
                 model, meta, started, None, [], None, "error", "routing", str(exc)
             )
             raise GatewayError(str(exc)) from exc
@@ -629,7 +626,7 @@ class Gateway:
             if self._deadline_exceeded(target, deadline, attempts):
                 break
             if target.provider not in self._providers:
-                self._capture_embed(
+                self._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -674,7 +671,7 @@ class Gateway:
                     )
                 )
                 status = "success" if idx == 0 else "fallback_success"
-                self._capture_embed(
+                self._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -697,7 +694,7 @@ class Gateway:
                         error=str(exc),
                     )
                 )
-                self._capture_embed(
+                self._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -721,7 +718,7 @@ class Gateway:
                     )
                 )
                 continue
-        self._capture_embed(
+        self._capturer.record_embed(
             model,
             meta,
             started,
@@ -733,62 +730,6 @@ class Gateway:
             attempts[-1].error if attempts else None,
         )
         raise AllTargetsFailed(f"all embedding targets failed for model {model!r}")
-
-    def _capture_embed(
-        self,
-        model,
-        meta,
-        started,
-        model_resolved,
-        attempts,
-        resp,
-        status,
-        error_type,
-        error_message,
-    ) -> None:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        input_tokens = resp.input_tokens if resp else 0
-        cost = None
-        if resp is not None and model_resolved:
-            try:
-                cost = self._cost.cost(model_resolved, input_tokens, 0)
-            except Exception as exc:
-                log.warning("embed cost calculation failed (cost=None): %s", exc)
-        self._budget.add(meta.get("consumer", "unknown"), cost)
-        metrics.record_call(
-            model_resolved=model_resolved,
-            status=status,
-            latency_ms=latency_ms,
-            input_tokens=input_tokens,
-            output_tokens=0,
-            cost_usd=cost,
-            cache_hit=False,
-            error_type=error_type,
-        )
-        if self._store is None:
-            return
-        try:
-            rec = CallRecord(
-                id=str(uuid.uuid4()),
-                ts=time.time(),
-                latency_ms=latency_ms,
-                consumer=meta.get("consumer", "unknown"),
-                call_site=meta.get("call_site"),
-                trace_id=meta.get("trace_id"),
-                model_requested=model,
-                params={"embed": True, "n_inputs": len(resp.vectors) if resp else 0},
-                model_resolved=model_resolved,
-                attempts=attempts,
-                input_tokens=input_tokens,
-                cost_usd=cost,
-                status=status,
-                error_type=error_type,
-                error_message_redacted=redact(error_message) if error_message else None,
-                last_error=redact(attempts[-1].error) if attempts else None,
-            )
-            self._store.save(rec)
-        except Exception as exc:  # fail-open
-            log.warning("embed capture failed (fail-open): %s", exc)
 
     def _safe_cache_get(self, key):
         try:
@@ -802,103 +743,3 @@ class Gateway:
             self._cache.set(key, resp, self._cache_ttl_s)
         except Exception as exc:
             log.warning("cache set failed (fail-open): %s", exc)
-
-    def _capture(
-        self,
-        request,
-        meta,
-        started,
-        *,
-        model_resolved,
-        attempts,
-        resp,
-        status,
-        cache_hit,
-        cache_key,
-        error_type,
-        error_message,
-    ) -> None:
-        latency_ms = int((time.monotonic() - started) * 1000)
-        cost = None
-        if cache_hit:
-            cost = 0.0  # 命中缓存=省下真实开销
-        elif resp is not None and model_resolved:
-            try:
-                cost = self._cost.cost(
-                    model_resolved, resp.input_tokens, resp.output_tokens
-                )
-            except Exception as exc:
-                log.warning("cost calculation failed (cost=None): %s", exc)
-        # 实际成本计入预算累计(None/0 自动忽略)
-        self._budget.add(meta.get("consumer", "unknown"), cost)
-        # 指标:无论是否落库都上报(Prometheus,未装则 no-op)
-        metrics.record_call(
-            model_resolved=model_resolved,
-            status=status,
-            latency_ms=latency_ms,
-            input_tokens=resp.input_tokens if resp else 0,
-            output_tokens=resp.output_tokens if resp else 0,
-            cost_usd=cost,
-            cache_hit=cache_hit,
-            error_type=error_type,
-        )
-        if self._store is None:
-            return
-        try:
-            rec = CallRecord(
-                id=str(uuid.uuid4()),
-                ts=time.time(),
-                latency_ms=latency_ms,
-                consumer=meta.get("consumer", "unknown"),
-                call_site=meta.get("call_site"),
-                trace_id=meta.get("trace_id"),
-                model_requested=request.model,
-                params={
-                    "max_tokens": request.max_tokens,
-                    "temperature": request.temperature,
-                    "has_tools": bool(request.tools),
-                },
-                messages_redacted=redact_messages(request.messages),
-                prompt_version=meta.get("prompt_version"),
-                model_resolved=model_resolved,
-                attempts=attempts,
-                output_redacted=redact(resp.text) if resp else None,
-                finish_reason=resp.finish_reason if resp else None,
-                tool_calls=resp.tool_calls if resp else 0,
-                input_tokens=resp.input_tokens if resp else 0,
-                output_tokens=resp.output_tokens if resp else 0,
-                cost_usd=cost,
-                cache_hit=cache_hit,
-                cache_key=cache_key,
-                status=status,
-                error_type=error_type,
-                error_message_redacted=redact(error_message) if error_message else None,
-                last_error=redact(attempts[-1].error) if attempts else None,
-            )
-            self._store.save(rec)
-        except Exception as exc:  # fail-open:捕获绝不打断主调用
-            log.warning("capture failed (fail-open): %s", exc)
-
-    def _log_capture(
-        self,
-        request: NormalizedRequest,
-        meta: dict,
-        status: str,
-        model_resolved: str | None,
-        error_type: str | None,
-        cache_hit: bool,
-        started: float,
-    ) -> None:
-        log.info(
-            "llm_call",
-            extra={
-                "trace_id": meta.get("trace_id"),
-                "consumer": meta.get("consumer", "unknown"),
-                "model_requested": request.model,
-                "model_resolved": model_resolved,
-                "status": status,
-                "error_type": error_type,
-                "cache_hit": cache_hit,
-                "latency_ms": int((time.monotonic() - started) * 1000),
-            },
-        )
