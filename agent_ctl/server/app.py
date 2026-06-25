@@ -125,6 +125,15 @@ def build_server(
     def healthz():
         return {"status": "ok"}
 
+    @app.get("/metrics")
+    def metrics_endpoint():
+        from fastapi.responses import Response
+
+        from agent_ctl.obs import metrics
+
+        content_type, body = metrics.render()
+        return Response(content=body, media_type=content_type)
+
     @app.get("/v1/models")
     def list_models():
         return {

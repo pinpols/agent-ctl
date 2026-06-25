@@ -23,6 +23,7 @@ from agent_ctl.models import (
     NormalizedResponse,
     Target,
 )
+from agent_ctl.obs import metrics
 from agent_ctl.providers.base import Provider
 from agent_ctl.store.redaction import redact, redact_messages
 
@@ -283,23 +284,35 @@ class Gateway:
         error_type,
         error_message,
     ) -> None:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        cost = None
+        if cache_hit:
+            cost = 0.0  # 命中缓存=省下真实开销
+        elif resp is not None and model_resolved:
+            try:
+                cost = self._cost.cost(
+                    model_resolved, resp.input_tokens, resp.output_tokens
+                )
+            except Exception as exc:
+                log.warning("cost calculation failed (cost=None): %s", exc)
+        # 指标:无论是否落库都上报(Prometheus,未装则 no-op)
+        metrics.record_call(
+            model_resolved=model_resolved,
+            status=status,
+            latency_ms=latency_ms,
+            input_tokens=resp.input_tokens if resp else 0,
+            output_tokens=resp.output_tokens if resp else 0,
+            cost_usd=cost,
+            cache_hit=cache_hit,
+            error_type=error_type,
+        )
         if self._store is None:
             return
         try:
-            cost = None
-            if cache_hit:
-                cost = 0.0  # 命中缓存=省下真实开销
-            elif resp is not None and model_resolved:
-                try:
-                    cost = self._cost.cost(
-                        model_resolved, resp.input_tokens, resp.output_tokens
-                    )
-                except Exception as exc:
-                    log.warning("cost calculation failed (cost=None): %s", exc)
             rec = CallRecord(
                 id=str(uuid.uuid4()),
                 ts=time.time(),
-                latency_ms=int((time.monotonic() - started) * 1000),
+                latency_ms=latency_ms,
                 consumer=meta.get("consumer", "unknown"),
                 call_site=meta.get("call_site"),
                 trace_id=meta.get("trace_id"),
