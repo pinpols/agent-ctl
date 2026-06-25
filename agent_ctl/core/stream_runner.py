@@ -130,6 +130,49 @@ class StreamRunnerMixin:
         tcs: list | None = None
         try:
             for chunk in itertools.chain([] if first is None else [first], gen):
+                if deadline is not None and time.monotonic() >= deadline:
+                    # 开流后墙钟预算耗尽:逐块截断(已发部分保留),按 deadline 落库 + 收尾 done。
+                    # 注:无法中断单个已阻塞的 next() 读取(那由 provider SDK 的 read timeout 兜),
+                    # 本检查约束的是「长流/多块」的总墙钟,防止流式完全无视 deadline。
+                    attempts.append(
+                        self._attempt(
+                            target, "deadline", t0, "deadline exceeded mid-stream"
+                        )
+                    )
+                    self._capturer.record(
+                        request,
+                        meta,
+                        started,
+                        model_resolved=target.name,
+                        attempts=attempts,
+                        resp=NormalizedResponse(
+                            text="".join(parts),
+                            finish_reason="length",
+                            input_tokens=it,
+                            output_tokens=ot,
+                        ),
+                        status="deadline",
+                        cache_hit=False,
+                        cache_key=None,
+                        error_type="deadline",
+                        error_message=None,
+                    )
+                    self._capturer.log(
+                        request,
+                        meta,
+                        "deadline",
+                        target.name,
+                        "deadline",
+                        False,
+                        started,
+                    )
+                    yield StreamChunk(
+                        done=True,
+                        finish_reason="length",
+                        input_tokens=it,
+                        output_tokens=ot,
+                    )
+                    return True
                 if chunk is None:
                     continue
                 if chunk.done:

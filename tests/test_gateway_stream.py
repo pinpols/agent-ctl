@@ -329,3 +329,37 @@ def test_stream_empty_generator_captures_and_emits_done(tmp_path):
     assert "".join(c.text for c in chunks if not c.done) == ""
     rec = store.list_recent(1)[0]
     assert rec.status == "success"
+
+
+def test_stream_deadline_truncates_long_stream(tmp_path):
+    """#2:开流后 deadline 也要管——长流超预算应被逐块截断,不是无视 deadline 跑完。"""
+    import time as _t
+
+    class ManyChunks:
+        def invoke(self, *a):
+            raise NotImplementedError
+
+        def stream(self, target, request, timeout):
+            for i in range(20):
+                _t.sleep(0.02)  # 20 块 × 20ms = 0.4s 总时长
+                yield StreamChunk(text=str(i))
+            yield StreamChunk(
+                done=True, finish_reason="stop", input_tokens=1, output_tokens=1
+            )
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["s/m"]}),
+        providers={"s": ManyChunks()},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, timeout_s=60.0),
+        request_deadline_s=0.1,  # 100ms 总预算
+    )
+    t0 = _t.monotonic()
+    texts = [c.text for c in gw.invoke_stream(REQ) if not c.done]
+    elapsed = _t.monotonic() - t0
+    assert elapsed < 0.3  # 被 deadline 截断,远小于 0.4s
+    assert len(texts) < 20  # 没把整条流跑完
+    rec = store.list_recent(1)[0]
+    assert rec.status == "deadline"
