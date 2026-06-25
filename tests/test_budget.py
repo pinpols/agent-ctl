@@ -51,6 +51,24 @@ def test_add_ignores_none_and_zero():
     assert g.spent("c") == 0.0
 
 
+def test_reserve_blocks_one_call_before_cap():
+    """F5:预留一次"典型调用"余量 → 仍差约一次就触顶时即拒绝,收紧并发越界窗口。"""
+    g = BudgetGuard(per_consumer={"c": 0.01})
+    g.add("c", 0.004)  # spent=0.004,last_cost=0.004
+    # spent(0.004) < cap(0.01),但 spent+reserve(0.004) = 0.008 < 0.01 → 仍可过
+    g.check("c")
+    g.add("c", 0.004)  # spent=0.008
+    # spent(0.008) 仍 < cap,但 +reserve(0.004)=0.012 >= 0.01 → 提前拒绝(防越界)
+    with pytest.raises(BudgetExceeded):
+        g.check("c")
+
+
+def test_first_call_has_no_reserve():
+    """无历史成本时预留为 0,首call不被误拒。"""
+    g = BudgetGuard(per_consumer={"c": 0.01})
+    g.check("c")  # spent 0 + reserve 0 → 通过
+
+
 # ── 网关级:预算闸短路 ──────────────────────────────────────
 
 

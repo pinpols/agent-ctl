@@ -78,6 +78,28 @@ def test_close_flushes_pending(tmp_path):
     assert len(reopened.list_recent(10)) == 3
 
 
+def test_close_skips_inner_close_while_worker_draining():
+    """F4:join 超时(worker 仍在写)时不关内层,避免与活跃写者抢连接。"""
+    gate = threading.Event()
+
+    class BlockingInner:
+        def __init__(self):
+            self.closed = False
+
+        def save(self, record):
+            gate.wait()  # 卡住 worker,使其 join 超时
+
+        def close(self):
+            self.closed = True
+
+    inner = BlockingInner()
+    store = AsyncCaptureStore(inner)
+    store.save(_rec(0))  # worker 取走并卡在 save
+    store.close(timeout=0.2)  # join 超时 → worker 仍 alive
+    assert inner.closed is False  # 未在 worker 仍活时关内层
+    gate.set()  # 放行收尾
+
+
 def test_close_is_idempotent_and_save_after_close_drops(tmp_path):
     inner = SqliteCaptureStore(str(tmp_path / "c.db"))
     store = AsyncCaptureStore(inner)

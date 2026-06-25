@@ -80,14 +80,25 @@ class AsyncCaptureStore:
         self.flush()
         return self._inner.cost_summary(*args, **kwargs)
 
-    def close(self) -> None:
-        """幂等关停:落完队列、停后台线程、关内层。atexit 与显式调用都安全。"""
+    def close(self, timeout: float = 5.0) -> None:
+        """幂等关停:落完队列、停后台线程、关内层。atexit 与显式调用都安全。
+
+        仅在 worker 真正退出后才关内层——否则积压致 join 超时时,关闭内层会与仍在写的
+        worker 抢同一连接(SQLite 'closed' 错误)。worker 是 daemon,极端积压下让它
+        随进程退出由 OS 回收,不强关。
+        """
         if self._closed:
             return
         self._closed = True
         self._q.put(_STOP)
-        self._thread.join(timeout=5.0)
-        self._inner.close()
+        self._thread.join(timeout=timeout)
+        if not self._thread.is_alive():
+            self._inner.close()
+        else:
+            log.warning(
+                "async capture worker still draining at close; "
+                "skip inner.close to avoid racing an active writer"
+            )
 
     def __enter__(self) -> "AsyncCaptureStore":
         return self

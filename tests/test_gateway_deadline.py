@@ -158,3 +158,30 @@ def test_real_retriable_exhaustion_does_charge_circuit(tmp_path):
     with pytest.raises(AllTargetsFailed):
         gw.invoke(REQ)
     assert cb.allow("fake") is False  # 真实失败 → 开路
+
+
+class SlowEmbedProvider:
+    def __init__(self):
+        self.timeouts = []
+
+    def embed(self, target, inputs, timeout):
+        from agent_ctl.models import EmbeddingResponse
+
+        self.timeouts.append(timeout)
+        return EmbeddingResponse(vectors=[[0.1]], input_tokens=1)
+
+
+def test_embed_honors_request_deadline(tmp_path):
+    """F6:embed 也把单次超时压到剩余 deadline 预算。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = SlowEmbedProvider()
+    gw = Gateway(
+        router=Router({"default": ["emb/m"]}),
+        providers={"emb": p},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, timeout_s=60.0),
+        request_deadline_s=2.0,
+    )
+    gw.embed("default", ["hi"], {"consumer": "t"})
+    assert p.timeouts[0] <= 2.0  # 压到剩余预算,而非 60s

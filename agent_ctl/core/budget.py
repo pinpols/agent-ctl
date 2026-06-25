@@ -26,6 +26,10 @@ class BudgetGuard:
         self._global_cap = global_cap
         self._spent: dict[str, float] = {}
         self._global_spent = 0.0
+        # 每 consumer 最近一次实际成本,作为 check 的"预留余量":在仍差约一次调用就触顶时
+        # 即拒绝,把并发 in-flight 调用导致的越界窗口从"任意并发量"收紧到"约一次调用"。
+        # 这是廉价的近似收紧,非精确预留引擎(精确/分布式预算见 ADR-0001 后置项)。
+        self._last_cost: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @property
@@ -33,29 +37,35 @@ class BudgetGuard:
         return bool(self._caps) or self._global_cap is not None
 
     def check(self, consumer: str) -> None:
-        """已达 per-consumer 或全局上限 → 抛 BudgetExceeded(调用前短路)。"""
+        """已达上限(或预留余量后将触顶)→ 抛 BudgetExceeded(调用前短路)。"""
         if not self.enabled:
             return
         with self._lock:
+            reserve = self._last_cost.get(consumer, 0.0)  # 预留一次"典型调用"余量
             cap = self._caps.get(consumer)
-            if cap is not None and self._spent.get(consumer, 0.0) >= cap:
+            spent = self._spent.get(consumer, 0.0)
+            if cap is not None and spent + reserve >= cap:
                 raise BudgetExceeded(
                     f"consumer {consumer!r} budget exhausted: "
-                    f"spent {self._spent.get(consumer, 0.0):.6f} >= cap {cap:.6f} USD"
+                    f"spent {spent:.6f} (+reserve {reserve:.6f}) >= cap {cap:.6f} USD"
                 )
-            if self._global_cap is not None and self._global_spent >= self._global_cap:
+            if (
+                self._global_cap is not None
+                and self._global_spent + reserve >= self._global_cap
+            ):
                 raise BudgetExceeded(
-                    f"global budget exhausted: spent {self._global_spent:.6f} >= "
-                    f"cap {self._global_cap:.6f} USD"
+                    f"global budget exhausted: spent {self._global_spent:.6f} "
+                    f"(+reserve {reserve:.6f}) >= cap {self._global_cap:.6f} USD"
                 )
 
     def add(self, consumer: str, cost: float | None) -> None:
-        """把一次调用的实际成本计入累计(cost=None/0 忽略)。"""
+        """把一次调用的实际成本计入累计(cost=None/0 忽略),并更新预留余量。"""
         if not self.enabled or not cost:
             return
         with self._lock:
             self._spent[consumer] = self._spent.get(consumer, 0.0) + cost
             self._global_spent += cost
+            self._last_cost[consumer] = cost
 
     def spent(self, consumer: str) -> float:
         with self._lock:

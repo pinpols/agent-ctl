@@ -628,7 +628,13 @@ class Gateway:
             )
             raise GatewayError(str(exc)) from exc
         attempts: list[Attempt] = []
+        deadline = self._deadline_for(started)
         for idx, target in enumerate(targets):
+            if deadline is not None and time.monotonic() >= deadline:
+                attempts.append(
+                    self._attempt(target, "deadline", 0, "request deadline exceeded")
+                )
+                break
             if target.provider not in self._providers:
                 self._capture_embed(
                     model,
@@ -669,9 +675,15 @@ class Gateway:
                     )
                 )
                 continue
+            embed_timeout = self._timeout_within(deadline)
+            if embed_timeout is None:
+                attempts.append(
+                    self._attempt(target, "deadline", 0, "request deadline exceeded")
+                )
+                break
             started_t = time.monotonic()
             try:
-                resp = embed_fn(target, inputs, self._retry.timeout_s)
+                resp = embed_fn(target, inputs, embed_timeout)
                 self._circuit.record_success(target.provider)
                 attempts.append(
                     Attempt(
