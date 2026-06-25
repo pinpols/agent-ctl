@@ -4,10 +4,11 @@ import time
 import pytest
 
 from agent_ctl.config import RetryConfig
+from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.gateway import Gateway
 from agent_ctl.core.router import Router
-from agent_ctl.errors import AllTargetsFailed
+from agent_ctl.errors import AllTargetsFailed, RetriableError
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
@@ -110,3 +111,50 @@ def test_deadline_already_exceeded_records_all_failed(tmp_path):
     assert p.calls == 1
     rec = store.list_recent(1)[0]
     assert rec.attempts[-1].outcome == "deadline"
+
+
+class SlowFailProvider:
+    """invoke 先 sleep(消耗 deadline 预算)再抛 RetriableError。"""
+
+    def __init__(self, sleep_s):
+        self._sleep = sleep_s
+
+    def invoke(self, target, request, timeout):
+        time.sleep(self._sleep)
+        raise RetriableError("slow fail")
+
+
+def test_deadline_exhaustion_does_not_charge_circuit(tmp_path):
+    """F2:deadline 耗尽(第2次尝试 timeout 归零)不计熔断,provider 不被误开路。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    cb = CircuitBreaker(failure_threshold=1, cooldown_s=30.0)
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": SlowFailProvider(0.06)},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=2, base_backoff_s=0.0, timeout_s=1.0),
+        request_deadline_s=0.05,  # 第1次尝试 sleep 0.06 即耗尽 → 第2次 DeadlineExceeded
+        circuit=cb,
+    )
+    with pytest.raises(AllTargetsFailed):
+        gw.invoke(REQ)
+    assert cb.allow("fake") is True  # 未因 deadline 误开路(阈值=1)
+
+
+def test_real_retriable_exhaustion_does_charge_circuit(tmp_path):
+    """对照:无 deadline 时,真实可重试耗尽**会**计熔断(阈值=1 → 开路)。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    cb = CircuitBreaker(failure_threshold=1, cooldown_s=30.0)
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": SlowFailProvider(0.0)},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=1.0),
+        request_deadline_s=0.0,  # 关闭 deadline → 纯可重试失败
+        circuit=cb,
+    )
+    with pytest.raises(AllTargetsFailed):
+        gw.invoke(REQ)
+    assert cb.allow("fake") is False  # 真实失败 → 开路

@@ -17,6 +17,7 @@ from agent_ctl.core.router import Router
 from agent_ctl.errors import (
     AllTargetsFailed,
     BudgetExceeded,
+    DeadlineExceeded,
     GatewayError,
     RetriableError,
     TerminalError,
@@ -96,7 +97,7 @@ class Gateway:
         for n in range(self._retry.max_attempts_per_target):
             timeout = self._timeout_within(deadline)
             if timeout is None:
-                raise RetriableError("request deadline exceeded")
+                raise DeadlineExceeded("request deadline exceeded")
             started = time.monotonic()
             try:
                 resp = provider.invoke(target, request, timeout)
@@ -319,6 +320,8 @@ class Gateway:
                     request, meta, "error", target.name, "terminal", False, started
                 )
                 raise
+            except DeadlineExceeded:
+                continue  # 墙钟预算耗尽:不计熔断,下一轮 deadline 守卫会停止回退
             except RetriableError:
                 self._circuit.record_failure(target.provider)
                 continue  # 可重试耗尽 → 回退下一目标(attempts 已记入)
@@ -407,6 +410,8 @@ class Gateway:
                         target.name,
                     )
                     raise
+                except DeadlineExceeded:
+                    continue  # 墙钟预算耗尽:不计熔断
                 except (RetriableError, TimeoutError):
                     self._circuit.record_failure(target.provider)
                     continue
@@ -441,8 +446,9 @@ class Gateway:
                 attempts.append(self._attempt(target, "retriable", t0, str(exc)))
                 continue  # 开流前失败 → 回退下一目标
 
-            # 已开流 → 提交此 target,后续不回退
-            self._circuit.record_success(target.provider)
+            # 已开流 → 提交此 target,后续不回退。熔断状态待流跑完再定:
+            # 成功完成才 record_success,中途断流 record_failure(否则反复中途失败的
+            # provider 会"开流即成功"自我赦免、永不开路)。
             parts: list[str] = []
             fr: str | None = None
             it = ot = 0
@@ -459,12 +465,14 @@ class Gateway:
                     elif chunk.text:
                         parts.append(chunk.text)
                         yield chunk
-            except Exception as exc:  # 流中途失败:已发字节无法回退 → 记错并抛
+            except Exception as exc:  # 流中途失败:已发字节无法回退 → 计熔断、记错并抛
+                self._circuit.record_failure(target.provider)
                 attempts.append(self._attempt(target, "stream_error", t0, str(exc)))
                 self._capture_stream_error(
                     request, meta, started, attempts, "stream", str(exc), target.name
                 )
                 raise GatewayError(str(exc)) from exc
+            self._circuit.record_success(target.provider)
             attempts.append(self._attempt(target, "success", t0, None))
             resp = NormalizedResponse(
                 text="".join(parts),

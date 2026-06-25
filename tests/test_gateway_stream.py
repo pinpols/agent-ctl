@@ -134,6 +134,18 @@ def test_stream_degrades_to_buffered_when_no_stream_capability(tmp_path):
     assert rec.status == "success"
 
 
+def test_stream_mid_failure_charges_circuit_and_can_open(tmp_path):
+    """F3:首块已出后中途断流计熔断;反复中途失败累计到阈值即开路(不自我赦免)。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    cb = CircuitBreaker(failure_threshold=2, cooldown_s=30.0)
+    p = FakeStreamProvider(["a", "b"], mid_error=RetriableError("drop"))
+    gw = _gw({"s": p}, {"default": ["s/m"]}, store, circuit=cb)
+    for _ in range(2):
+        with pytest.raises(Exception):
+            list(gw.invoke_stream(REQ))  # 每次:出首块 "a" 后中途失败 → record_failure
+    assert cb.allow("s") is False  # 两次中途失败累计 → 开路(此前会"开流即成功"永不开路)
+
+
 def test_stream_open_circuit_skips_provider(tmp_path):
     store = SqliteCaptureStore(str(tmp_path / "c.db"))
     bad = FakeStreamProvider([], start_error=RetriableError("503"))
