@@ -88,6 +88,35 @@ def test_to_normalized_extracts_system():
     assert req.temperature == 0.3
 
 
+def test_to_openai_response_surfaces_tool_calls():
+    """H7:非流式响应从 raw 还原 OpenAI message.tool_calls(否则 HTTP 工具调用拿不到)。"""
+    import json
+
+    resp = NormalizedResponse(
+        text="",
+        finish_reason="tool_calls",
+        raw={
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "diagnose", "input": {"x": 1}}
+            ]
+        },
+    )
+    out = to_openai_response(resp, "m", created=1)
+    msg = out["choices"][0]["message"]
+    assert msg["content"] is None  # 有工具调用且无文本 → content=null
+    assert msg["tool_calls"][0]["id"] == "t1"
+    assert msg["tool_calls"][0]["function"]["name"] == "diagnose"
+    assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"x": 1}
+    assert out["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_to_openai_response_no_tool_calls_unchanged():
+    """无工具调用时形状不变(content 原样,无 tool_calls 键)。"""
+    resp = NormalizedResponse(text="答案", finish_reason="stop")
+    msg = to_openai_response(resp, "m", created=1)["choices"][0]["message"]
+    assert msg == {"role": "assistant", "content": "答案"}
+
+
 def test_to_openai_response_shape():
     resp = NormalizedResponse(
         text="答案",
@@ -217,6 +246,45 @@ def test_streaming_budget_error_maps_402():
         json={"model": "openai/gpt-4o", "messages": [], "stream": True},
     )
     assert r.status_code == 402
+
+
+def test_handlers_offload_blocking_calls_to_threadpool():
+    """H1:阻塞网关调用卸到线程池 → 并发请求不被事件循环串行化。"""
+    import asyncio
+    import time as _time
+
+    import httpx
+    from httpx import ASGITransport
+
+    class SlowGateway:
+        def invoke(self, req):
+            _time.sleep(0.2)  # 模拟阻塞 I/O
+            return NormalizedResponse(text="ok")
+
+    app = build_server(SlowGateway(), now=lambda: 1, rate_limit_per_minute=0)
+
+    async def _run():
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as client:
+            start = _time.monotonic()
+            await asyncio.gather(
+                *[
+                    client.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "m",
+                            "messages": [{"role": "user", "content": "hi"}],
+                        },
+                    )
+                    for _ in range(5)
+                ]
+            )
+            return _time.monotonic() - start
+
+    elapsed = asyncio.run(_run())
+    # 5 个各 0.2s 阻塞调用:线程池并发 ~0.2-0.4s;若卡事件循环则串行 ~1.0s+
+    assert elapsed < 0.7
 
 
 def test_streaming_emits_tool_calls_frame():

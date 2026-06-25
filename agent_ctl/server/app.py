@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -7,6 +8,7 @@ from json import JSONDecodeError
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from agent_ctl.errors import (
     AllTargetsFailed,
@@ -52,9 +54,36 @@ def to_normalized(body: dict) -> NormalizedRequest:
     )
 
 
+def _raw_tool_uses_to_openai(resp: NormalizedResponse) -> list[dict]:
+    """从 raw 的 Anthropic 风格 content 还原 OpenAI message.tool_calls(非流式工具调用)。"""
+    blocks = (resp.raw or {}).get("content") or []
+    out = []
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            out.append(
+                {
+                    "id": b.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": b.get("name", ""),
+                        "arguments": json.dumps(b.get("input", {}), ensure_ascii=False),
+                    },
+                }
+            )
+    return out
+
+
 def to_openai_response(
     resp: NormalizedResponse, requested_model: str, created: int
 ) -> dict:
+    tool_calls = _raw_tool_uses_to_openai(resp)
+    # 有工具调用且无文本时 content=null(OpenAI 约定);否则原样输出文本。
+    content: str | None = resp.text
+    if tool_calls and not resp.text:
+        content = None
+    message: dict = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -63,7 +92,7 @@ def to_openai_response(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": resp.text},
+                "message": message,
                 "finish_reason": resp.finish_reason or "stop",
             }
         ],
@@ -140,6 +169,17 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
             yield frame({"content": chunk.text})
     yield frame({}, finish_reason=final_fr)
     yield "data: [DONE]\n\n"
+
+
+_NO_FIRST = object()  # 流式预拉:生成器空(StopIteration)的哨兵
+
+
+def _pull_first(gen):
+    """在线程池里安全预拉首块:空生成器返回哨兵,网关异常照常抛出(供 await 处映射)。"""
+    try:
+        return next(gen)
+    except StopIteration:
+        return _NO_FIRST
 
 
 def _error_body(message: str, err_type: str) -> dict:
@@ -276,24 +316,26 @@ def build_server(
                 content=_error_body(str(exc), "invalid_request_error"),
             )
         created = clock()
+        # 网关调用是阻塞 I/O(provider SDK 同步)→ 卸到线程池,避免卡死事件循环、
+        # 让 server 在一次 LLM 调用期间仍能并发服务其他连接。
         if body.get("stream"):
             from fastapi.responses import StreamingResponse
 
-            # 预拉首块:把"开流前"错误(预算/路由/终态/全失败)降级为普通 HTTP 状态;
-            # 首块已出后再发生的中途错误只能终止流(已发字节无法改状态码)。
+            # 预拉首块(线程池):把"开流前"错误(预算/路由/终态/全失败)降级为普通 HTTP
+            # 状态;首块已出后再发生的中途错误只能终止流(已发字节无法改状态码)。
             gen = gateway.invoke_stream(req)
             try:
-                first = next(gen)
-            except StopIteration:
-                first = None
+                first = await run_in_threadpool(_pull_first, gen)
             except GatewayError as exc:
                 return _gateway_error_response(exc)
             return StreamingResponse(
-                _sse_from_chunks(first, gen, body["model"], created),
+                _sse_from_chunks(
+                    None if first is _NO_FIRST else first, gen, body["model"], created
+                ),
                 media_type="text/event-stream",
             )
         try:
-            resp = gateway.invoke(req)
+            resp = await run_in_threadpool(gateway.invoke, req)
         except GatewayError as exc:
             return _gateway_error_response(exc)
         return to_openai_response(resp, body["model"], created)
@@ -333,8 +375,11 @@ def build_server(
                 content=_error_body("field 'input' is empty", "invalid_request_error"),
             )
         try:
-            resp = gateway.embed(
-                body["model"], inputs, {"consumer": "openai-compat-server"}
+            resp = await run_in_threadpool(
+                gateway.embed,
+                body["model"],
+                inputs,
+                {"consumer": "openai-compat-server"},
             )
         except GatewayError as exc:
             return _gateway_error_response(exc)
