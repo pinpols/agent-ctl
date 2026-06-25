@@ -1,0 +1,38 @@
+# 真 provider 契约冒烟 —— nightly + 手动触发。
+#
+# 目的:常规 CI(ci.yml)的 provider 解析全打 fake SDK 对象,真 SDK 一改响应/chunk 形状
+# 测试仍全绿但生产会炸。本工作流每天用真 API(低 max_tokens)打一次,挡 SDK 漂移。
+#
+# ⚠️ 本地无法验证:需在 repo Secrets 配 provider key(至少 DEEPSEEK_API_KEY),且只在
+#    GitHub Actions 上执行。没配 key 时测试会优雅 skip(不 false-fail)。
+#    本工作流文件本身只能在 GitHub 端实跑确认,作者机器无法跑通这条 nightly。
+name: provider-smoke-nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # 每天 03:17 UTC
+  workflow_dispatch: {} # 允许手动触发
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install (含 provider SDK)
+        run: python -m pip install -e ".[dev,anthropic,openai,server]"
+      - name: Real-provider smoke (低 max_tokens;无 key 自动 skip)
+        env:
+          AGENT_CTL_SMOKE: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          # 可选:覆盖 chat / embeddings 模型名
+          AGENT_CTL_SMOKE_MODEL: ${{ vars.AGENT_CTL_SMOKE_MODEL }}
+          AGENT_CTL_SMOKE_EMBED_MODEL: ${{ vars.AGENT_CTL_SMOKE_EMBED_MODEL }}
+        run: python -m pytest tests/test_smoke_real.py -q -rs

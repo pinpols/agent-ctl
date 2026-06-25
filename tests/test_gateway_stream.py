@@ -2,11 +2,18 @@
 import pytest
 
 from agent_ctl.config import RetryConfig
+from agent_ctl.core.budget import BudgetGuard
 from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.gateway import Gateway
 from agent_ctl.core.router import Router
-from agent_ctl.errors import RetriableError, TerminalError
+from agent_ctl.errors import (
+    AllTargetsFailed,
+    BudgetExceeded,
+    GatewayError,
+    RetriableError,
+    TerminalError,
+)
 from agent_ctl.models import NormalizedRequest, StreamChunk
 from agent_ctl.providers.fake import FakeProvider
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
@@ -194,3 +201,131 @@ def test_stream_open_circuit_skips_provider(tmp_path):
     list(gw.invoke_stream(REQ))  # bad 开流失败 1 次 → 开路
     list(gw.invoke_stream(REQ))  # 第二次 bad 被熔断跳过
     assert bad.calls == 1  # 第二次未再打 bad
+
+
+# ── 覆盖补强:stream 内预算/路由/未注册/全失败/缓冲回退/deadline ──────────────
+
+
+def test_stream_budget_exceeded_before_open(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["s/m"]}),
+        providers={"s": FakeStreamProvider(["x"])},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RETRY,
+        budget=BudgetGuard(per_consumer={"t": 0.0}),  # cap 0 → 首次即超
+    )
+    with pytest.raises(BudgetExceeded):
+        list(gw.invoke_stream(REQ))
+    rec = store.list_recent(1)[0]
+    assert rec.status == "error" and rec.error_type == "budget"
+
+
+def test_stream_unknown_model_routing_error(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = _gw({"s": FakeStreamProvider(["x"])}, {"default": ["s/m"]}, store)
+    with pytest.raises(GatewayError):
+        list(
+            gw.invoke_stream(
+                NormalizedRequest(
+                    model="missing",
+                    messages=[{"role": "user", "content": "hi"}],
+                    metadata={"consumer": "t"},
+                )
+            )
+        )
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "routing"
+
+
+def test_stream_direct_unregistered_provider(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = _gw({"s": FakeStreamProvider(["x"])}, {"default": ["s/m"]}, store)
+    with pytest.raises(GatewayError):
+        list(
+            gw.invoke_stream(
+                NormalizedRequest(
+                    model="nope/x",
+                    messages=[{"role": "user", "content": "hi"}],
+                    metadata={"consumer": "t"},
+                )
+            )
+        )
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "provider"
+
+
+def test_stream_all_targets_fail(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    only = FakeStreamProvider([], start_error=RetriableError("503"))
+    gw = _gw({"s": only}, {"default": ["s/m"]}, store)
+    with pytest.raises(AllTargetsFailed):
+        list(gw.invoke_stream(REQ))
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "all_failed"
+
+
+def test_stream_buffered_terminal_propagates(tmp_path):
+    """无 stream 能力的目标缓冲降级,invoke 抛 terminal → 透传不回退。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = _gw({"f": FakeProvider(["terminal"])}, {"default": ["f/m"]}, store)
+    with pytest.raises(TerminalError):
+        list(gw.invoke_stream(REQ))
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "terminal"
+
+
+def test_stream_buffered_retriable_falls_back_to_native(tmp_path):
+    """无 stream 能力目标缓冲降级遇 retriable → 回退到下一个原生流式目标。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    buf = FakeProvider(["retriable"])  # 无 stream
+    nat = FakeStreamProvider(["ok"])
+    gw = _gw({"buf": buf, "nat": nat}, {"default": ["buf/m", "nat/m"]}, store)
+    chunks = list(gw.invoke_stream(REQ))
+    assert "".join(c.text for c in chunks if not c.done) == "ok"
+    rec = store.list_recent(1)[0]
+    assert rec.status == "fallback_success"
+
+
+def test_stream_deadline_break_stops_fallback(tmp_path):
+    """第一目标耗时超 deadline → 第二目标在循环顶被 deadline 守卫跳过。"""
+    import time as _t
+
+    class SlowBufferedFail:
+        def invoke(self, target, request, timeout):
+            _t.sleep(0.06)
+            raise RetriableError("slow")
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["a/m", "b/m"]}),
+        providers={"a": SlowBufferedFail(), "b": FakeStreamProvider(["x"])},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, timeout_s=60.0),
+        request_deadline_s=0.05,
+    )
+    with pytest.raises(AllTargetsFailed):
+        list(gw.invoke_stream(REQ))
+    rec = store.list_recent(1)[0]
+    assert rec.attempts[-1].outcome == "deadline"
+
+
+def test_stream_empty_generator_captures_and_emits_done(tmp_path):
+    """provider 的 stream 一个块都不产(连 done 都没)→ first=None,仍捕获 + 收尾 done。"""
+
+    class EmptyStream:
+        def invoke(self, target, request, timeout):
+            raise NotImplementedError
+
+        def stream(self, target, request, timeout):
+            return iter(())  # 空生成器 → next() 直接 StopIteration
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = _gw({"e": EmptyStream()}, {"default": ["e/m"]}, store)
+    chunks = list(gw.invoke_stream(REQ))
+    assert chunks and chunks[-1].done  # 收尾 done
+    assert "".join(c.text for c in chunks if not c.done) == ""
+    rec = store.list_recent(1)[0]
+    assert rec.status == "success"
