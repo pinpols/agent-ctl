@@ -2,6 +2,11 @@
 
 > 项目名 `agentctl`(已定)。本文件是 **AgentOps 控制面** 的第一个子项目(脊柱)的设计。
 > 日期:2026-06-24。状态:待用户复核 → 转 writing-plans。
+>
+> ⚠️ **2026-06-25 更新**:本文 §2 的部分"非目标"已被 [ADR-0001](../../adr/0001-gateway-maturity-and-hardening.md)
+> 取代并实现——**流式**(已做真·passthrough,非 v2)、**限流**(server 已做)。另已超出本文
+> 范围补齐:跨 provider 工具归一、Prometheus 指标、按 provider 熔断、请求 deadline、成本预算闸、
+> 捕获异步化。以 ADR-0001 为准。
 
 ## 1. 背景与北极星
 

@@ -15,6 +15,18 @@ prices:                 # [input_per_1M_usd, output_per_1M_usd]
 cache_enabled: true
 cache_ttl_s: 600
 cache_tool_responses: false
+# 捕获落库移出请求主路径(后台线程);关闭则同步落库(测试/确定性可读)
+capture_async: true
+# 按 provider 熔断:连续失败达阈值开路冷却,回退链跳过。0=关闭
+circuit_failure_threshold: 5
+circuit_cooldown_s: 30
+# 单次调用墙钟总预算(秒),封顶 重试×回退×单目标超时;0=不封顶
+request_deadline_s: 120
+# 成本预算闸(USD,进程内累计):per-consumer 上限 + 全局上限。达限短路返 402
+budgets: {}
+  # ops-agent: 5.0
+  # rag: 2.0
+budget_global: null
 profile: dev
 db_path: .agent_ctl/capture.db
 retry:

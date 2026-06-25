@@ -90,7 +90,20 @@ curl http://127.0.0.1:8400/v1/chat/completions \
   -d '{"model":"default","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-The server currently supports non-streaming chat completions. Streaming is intentionally left for v2 because chunk aggregation changes capture, cost, cache, and error semantics.
+### Surface
+
+- `POST /v1/chat/completions` — chat, including real `stream:true` SSE (passthrough; capture/cost are aggregated at stream end). Fallback applies only before the first byte; once streaming starts the chosen target is committed.
+- `POST /v1/embeddings` — `input` as a string or array of strings (OpenAI-compatible providers only).
+- `GET /v1/models`, `GET /healthz`, `GET /metrics` (Prometheus).
+
+### Governance knobs (config)
+
+- `circuit_failure_threshold` / `circuit_cooldown_s` — per-provider circuit breaker; the fallback chain skips an open provider until cooldown.
+- `request_deadline_s` — wall-clock budget per call; caps the worst case of retries × fallback × per-target timeout.
+- `budgets` (per-consumer USD) / `budget_global` — cost budget gate; an exhausted budget short-circuits before hitting a provider and returns HTTP 402.
+- `capture_async` — capture writes run off the request path on a background thread (fail-open; the request never blocks on storage I/O).
+
+See [ADR-0001](docs/adr/0001-gateway-maturity-and-hardening.md) for the maturity/hardening decisions and the remaining (intentional) non-goals: distributed circuit/cache, Postgres capture store, persistent/shared budget windows, tiered cost modeling, and multi-tenant auth.
 
 ## Capture Storage
 
