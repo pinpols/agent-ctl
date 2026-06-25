@@ -8,6 +8,7 @@ import uuid
 
 from agent_ctl.config import RetryConfig
 from agent_ctl.core.cache import make_key
+from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.router import Router
 from agent_ctl.errors import (
@@ -42,6 +43,7 @@ class Gateway:
         cache_enabled: bool = True,
         cache_ttl_s: int = 600,
         cache_tool_responses: bool = False,
+        circuit: CircuitBreaker | None = None,
     ) -> None:
         self._router = router
         self._providers = providers
@@ -52,6 +54,7 @@ class Gateway:
         self._cache_enabled = cache_enabled
         self._cache_ttl_s = cache_ttl_s
         self._cache_tool_responses = cache_tool_responses
+        self._circuit = circuit or CircuitBreaker(failure_threshold=0)  # 默认关闭
 
         # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError。
         # 只校验 routes(必经);aliases 是可选项(共享配置里可能含本消费者没 key 的 provider),
@@ -195,9 +198,22 @@ class Gateway:
                 raise GatewayError(
                     f"unregistered provider: {target.provider!r} (model={request.model!r})"
                 )
+            if not self._circuit.allow(target.provider):
+                # 该 provider 熔断开路 → 跳过,试下一目标(留痕)
+                all_attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="circuit_open",
+                        latency_ms=0,
+                        error="circuit open",
+                    )
+                )
+                continue
             provider = self._providers[target.provider]
             try:
                 resp = self._invoke_target(provider, target, request, all_attempts)
+                self._circuit.record_success(target.provider)
                 status = "success" if idx == 0 else "fallback_success"
                 if cache_key:
                     self._safe_cache_set(cache_key, resp)
@@ -219,7 +235,8 @@ class Gateway:
                 )
                 return resp
             except TerminalError as exc:
-                # 终态(鉴权/参数):不回退,attempts 已由 _invoke_target 记入 all_attempts
+                # 终态(鉴权/参数/欠费):计入熔断(持续 4xx 应短路该 provider),但不回退
+                self._circuit.record_failure(target.provider)
                 self._capture(
                     request,
                     meta,
@@ -238,6 +255,7 @@ class Gateway:
                 )
                 raise
             except RetriableError:
+                self._circuit.record_failure(target.provider)
                 continue  # 可重试耗尽 → 回退下一目标(attempts 已记入)
 
         self._capture(

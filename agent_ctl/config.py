@@ -22,6 +22,9 @@ class Config(BaseModel):
     cache_enabled: bool = True
     cache_ttl_s: int = 600
     cache_tool_responses: bool = False
+    # 熔断:某 provider 连续失败达阈值则开路冷却,期间回退跳过它。0=关闭。
+    circuit_failure_threshold: int = 5
+    circuit_cooldown_s: float = 30.0
     profile: str = "dev"
     db_path: str = ".agent_ctl/capture.db"
     retry: RetryConfig = RetryConfig()

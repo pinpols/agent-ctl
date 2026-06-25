@@ -82,6 +82,7 @@ def _cmd_serve(cfg, args) -> int:
     import uvicorn
 
     from agent_ctl.core.cache import MemoryCache
+    from agent_ctl.core.circuit import CircuitBreaker
     from agent_ctl.core.cost import CostMeter
     from agent_ctl.core.gateway import Gateway
     from agent_ctl.core.router import Router
@@ -111,6 +112,7 @@ def _cmd_serve(cfg, args) -> int:
         cache_enabled=cfg.cache_enabled,
         cache_ttl_s=cfg.cache_ttl_s,
         cache_tool_responses=cfg.cache_tool_responses,
+        circuit=CircuitBreaker(cfg.circuit_failure_threshold, cfg.circuit_cooldown_s),
     )
     app = build_server(
         gateway,

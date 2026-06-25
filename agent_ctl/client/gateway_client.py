@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from agent_ctl.config import Config
 from agent_ctl.core.cache import MemoryCache
+from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.gateway import Gateway
 from agent_ctl.core.router import Router
@@ -61,6 +62,9 @@ class GatewayClient:
             cache_enabled=config.cache_enabled,
             cache_ttl_s=config.cache_ttl_s,
             cache_tool_responses=config.cache_tool_responses,
+            circuit=CircuitBreaker(
+                config.circuit_failure_threshold, config.circuit_cooldown_s
+            ),
         )
         return cls(gateway)
 
