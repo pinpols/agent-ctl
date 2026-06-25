@@ -42,6 +42,12 @@ class NormalizedResponse(BaseModel):
     raw: dict | None = None
 
 
+class EmbeddingResponse(BaseModel):
+    vectors: list[list[float]]
+    input_tokens: int = 0
+    raw: dict | None = None
+
+
 class Attempt(BaseModel):
     provider: str
     model: str

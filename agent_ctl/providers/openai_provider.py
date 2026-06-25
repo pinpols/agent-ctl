@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from agent_ctl.errors import RetriableError, TerminalError
-from agent_ctl.models import NormalizedRequest, NormalizedResponse, Target
+from agent_ctl.models import (
+    EmbeddingResponse,
+    NormalizedRequest,
+    NormalizedResponse,
+    Target,
+)
 from agent_ctl.providers.tooltrans import (
     anthropic_messages_to_openai,
     anthropic_tool_choice_to_openai,
@@ -20,6 +25,16 @@ def classify_status(status: int) -> str:
     if status == 429 or status >= 500:
         return "retriable"
     return "terminal"
+
+
+def _typed_error(exc: Exception) -> Exception:
+    """SDK 异常 → 类型化网关错误。有状态码按 4xx/5xx 分类,无状态码(网络)按可重试。"""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        return RetriableError(str(exc))  # 网络/未知 → 可重试
+    if classify_status(status) == "retriable":
+        return RetriableError(str(exc))
+    return TerminalError(str(exc))
 
 
 class OpenAIProvider:
@@ -56,12 +71,7 @@ class OpenAIProvider:
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            status = getattr(exc, "status_code", None)
-            if status is not None and classify_status(status) == "retriable":
-                raise RetriableError(str(exc)) from exc
-            if status is not None:
-                raise TerminalError(str(exc)) from exc
-            raise RetriableError(str(exc)) from exc  # 网络/未知 → 可重试
+            raise _typed_error(exc) from exc
 
         choice = resp.choices[0]
         text = choice.message.content or ""
@@ -77,4 +87,22 @@ class OpenAIProvider:
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
             raw=raw,
+        )
+
+    def embed(
+        self, target: Target, inputs: list[str], timeout: float
+    ) -> EmbeddingResponse:
+        """OpenAI 兼容 embeddings。input 顺序与返回向量顺序一致(按 data.index 排序保证)。"""
+        try:
+            resp = self._client.embeddings.create(
+                model=target.model, input=inputs, timeout=timeout
+            )
+        except Exception as exc:
+            raise _typed_error(exc) from exc
+        data = sorted(resp.data, key=lambda d: getattr(d, "index", 0))
+        vectors = [list(d.embedding) for d in data]
+        usage = getattr(resp, "usage", None)
+        return EmbeddingResponse(
+            vectors=vectors,
+            input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
         )

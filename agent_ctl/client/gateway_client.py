@@ -7,7 +7,7 @@ from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.gateway import Gateway
 from agent_ctl.core.router import Router
-from agent_ctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.models import EmbeddingResponse, NormalizedRequest, NormalizedResponse
 from agent_ctl.models import Target
 from agent_ctl.providers.base import Provider
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
@@ -90,3 +90,6 @@ class GatewayClient:
             metadata=metadata,
         )
         return self._gateway.invoke(request)
+
+    def embed(self, model: str, inputs: list[str], **metadata) -> EmbeddingResponse:
+        return self._gateway.embed(model, inputs, metadata)

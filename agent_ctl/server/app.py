@@ -70,6 +70,48 @@ def to_openai_response(
     }
 
 
+def to_openai_embeddings(resp, requested_model: str) -> dict:
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "index": i, "embedding": vec}
+            for i, vec in enumerate(resp.vectors)
+        ],
+        "model": requested_model,
+        "usage": {
+            "prompt_tokens": resp.input_tokens,
+            "total_tokens": resp.input_tokens,
+        },
+    }
+
+
+def _sse_stream(resp: NormalizedResponse, requested_model: str, created: int):
+    """把已完成的响应切成 OpenAI 兼容 SSE chunk(缓冲式:无 TTFB 收益,仅协议兼容)。
+
+    真·逐 token 流式需各 provider 原生 streaming 且绕过治理层(成本/捕获/重试均依赖完整
+    响应),代价远大于收益;此处以一段 content delta 还原 stream=true 客户端契约。
+    """
+    import json as _json
+
+    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+
+    def chunk(delta: dict, finish_reason=None) -> str:
+        payload = {
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": requested_model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    yield chunk({"role": "assistant"})
+    if resp.text:
+        yield chunk({"content": resp.text})
+    yield chunk({}, finish_reason=resp.finish_reason or "stop")
+    yield "data: [DONE]\n\n"
+
+
 def _error_body(message: str, err_type: str) -> dict:
     return {"error": {"message": message, "type": err_type, "code": err_type}}
 
@@ -170,13 +212,6 @@ def build_server(
                 status_code=400,
                 content=_error_body("field 'model' required", "invalid_request_error"),
             )
-        if body.get("stream"):
-            return JSONResponse(
-                status_code=400,
-                content=_error_body(
-                    "streaming not supported yet", "invalid_request_error"
-                ),
-            )
         try:
             req = to_normalized(body)
         except ValueError as exc:
@@ -184,6 +219,8 @@ def build_server(
                 status_code=400,
                 content=_error_body(str(exc), "invalid_request_error"),
             )
+        # invoke 在流式前完成(治理:捕获/成本/熔断/重试都依赖完整响应),
+        # 故所有错误仍以普通 HTTP 状态返回,流式仅切分已完成响应。
         try:
             resp = gateway.invoke(req)
         except TerminalError as exc:
@@ -198,7 +235,66 @@ def build_server(
             return JSONResponse(
                 status_code=400, content=_error_body(str(exc), "gateway_error")
             )
+        if body.get("stream"):
+            from fastapi.responses import StreamingResponse
+
+            return StreamingResponse(
+                _sse_stream(resp, body["model"], clock()),
+                media_type="text/event-stream",
+            )
         return to_openai_response(resp, body["model"], clock())
+
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request):
+        try:
+            body = await request.json()
+        except JSONDecodeError:
+            return JSONResponse(
+                status_code=400,
+                content=_error_body("invalid JSON body", "invalid_request_error"),
+            )
+        if not isinstance(body, dict) or not body.get("model"):
+            return JSONResponse(
+                status_code=400,
+                content=_error_body(
+                    "fields 'model' and 'input' required", "invalid_request_error"
+                ),
+            )
+        raw_input = body.get("input")
+        if isinstance(raw_input, str):
+            inputs = [raw_input]
+        elif isinstance(raw_input, list) and all(isinstance(x, str) for x in raw_input):
+            inputs = raw_input
+        else:
+            return JSONResponse(
+                status_code=400,
+                content=_error_body(
+                    "field 'input' must be a string or array of strings",
+                    "invalid_request_error",
+                ),
+            )
+        if not inputs:
+            return JSONResponse(
+                status_code=400,
+                content=_error_body("field 'input' is empty", "invalid_request_error"),
+            )
+        try:
+            resp = gateway.embed(
+                body["model"], inputs, {"consumer": "openai-compat-server"}
+            )
+        except TerminalError as exc:
+            return JSONResponse(
+                status_code=400, content=_error_body(str(exc), "terminal_error")
+            )
+        except AllTargetsFailed as exc:
+            return JSONResponse(
+                status_code=502, content=_error_body(str(exc), "upstream_error")
+            )
+        except GatewayError as exc:
+            return JSONResponse(
+                status_code=400, content=_error_body(str(exc), "gateway_error")
+            )
+        return to_openai_embeddings(resp, body["model"])
 
     return app
 

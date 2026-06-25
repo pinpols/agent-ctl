@@ -1,23 +1,32 @@
 from fastapi.testclient import TestClient
 
 from agent_ctl.errors import AllTargetsFailed, TerminalError
-from agent_ctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.models import EmbeddingResponse, NormalizedRequest, NormalizedResponse
 from agent_ctl.server.app import build_server, to_normalized, to_openai_response
 
 
 class FakeGateway:
     """记录收到的 NormalizedRequest,按预设返回/抛错。"""
 
-    def __init__(self, resp=None, exc=None):
+    def __init__(self, resp=None, exc=None, embed_resp=None, embed_exc=None):
         self._resp = resp
         self._exc = exc
+        self._embed_resp = embed_resp
+        self._embed_exc = embed_exc
         self.last_request = None
+        self.last_embed = None
 
     def invoke(self, request: NormalizedRequest) -> NormalizedResponse:
         self.last_request = request
         if self._exc:
             raise self._exc
         return self._resp
+
+    def embed(self, model, inputs, metadata=None) -> EmbeddingResponse:
+        self.last_embed = (model, inputs)
+        if self._embed_exc:
+            raise self._embed_exc
+        return self._embed_resp
 
 
 def _client(gateway, models=None):
@@ -131,13 +140,94 @@ def test_chat_completions_bad_max_tokens_400():
     assert "max_tokens" in r.json()["error"]["message"]
 
 
-def test_chat_completions_streaming_rejected():
-    c = _client(FakeGateway(resp=NormalizedResponse(text="")))
+def test_chat_completions_streaming_emits_sse_chunks():
+    gw = FakeGateway(
+        resp=NormalizedResponse(
+            text="你好", finish_reason="stop", input_tokens=5, output_tokens=2
+        )
+    )
+    c = _client(gw)
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    text = r.text
+    assert '"object": "chat.completion.chunk"' in text
+    assert '"role": "assistant"' in text
+    assert '"content": "你好"' in text
+    assert '"finish_reason": "stop"' in text
+    assert text.rstrip().endswith("data: [DONE]")
+
+
+def test_streaming_error_returns_http_status_not_stream():
+    """invoke 在流式前完成 → 错误仍以普通 HTTP 状态返回(非流式 502)。"""
+    c = _client(FakeGateway(exc=AllTargetsFailed("all down")))
     r = c.post(
         "/v1/chat/completions",
         json={"model": "openai/gpt-4o", "messages": [], "stream": True},
     )
+    assert r.status_code == 502
+
+
+# ── /v1/embeddings ──────────────────────────────────────────
+
+
+def test_embeddings_success_string_input():
+    gw = FakeGateway(
+        embed_resp=EmbeddingResponse(vectors=[[0.1, 0.2, 0.3]], input_tokens=4)
+    )
+    c = _client(gw)
+    r = c.post("/v1/embeddings", json={"model": "deepseek/x", "input": "hello"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "list"
+    assert body["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+    assert body["data"][0]["index"] == 0
+    assert body["usage"]["prompt_tokens"] == 4
+    assert gw.last_embed == ("deepseek/x", ["hello"])  # str 归一为单元素列表
+
+
+def test_embeddings_success_list_input_preserves_order():
+    gw = FakeGateway(
+        embed_resp=EmbeddingResponse(vectors=[[1.0], [2.0]], input_tokens=8)
+    )
+    c = _client(gw)
+    r = c.post("/v1/embeddings", json={"model": "deepseek/x", "input": ["a", "b"]})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert [d["index"] for d in data] == [0, 1]
+    assert [d["embedding"] for d in data] == [[1.0], [2.0]]
+
+
+def test_embeddings_missing_input_400():
+    c = _client(FakeGateway())
+    r = c.post("/v1/embeddings", json={"model": "deepseek/x"})
     assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_embeddings_empty_input_400():
+    c = _client(FakeGateway())
+    r = c.post("/v1/embeddings", json={"model": "deepseek/x", "input": []})
+    assert r.status_code == 400
+
+
+def test_embeddings_non_string_input_400():
+    c = _client(FakeGateway())
+    r = c.post("/v1/embeddings", json={"model": "deepseek/x", "input": [1, 2]})
+    assert r.status_code == 400
+
+
+def test_embeddings_upstream_failure_maps_502():
+    c = _client(FakeGateway(embed_exc=AllTargetsFailed("no embed provider")))
+    r = c.post("/v1/embeddings", json={"model": "deepseek/x", "input": "hi"})
+    assert r.status_code == 502
 
 
 def test_chat_completions_terminal_error_maps_400():

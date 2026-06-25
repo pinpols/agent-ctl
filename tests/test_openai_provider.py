@@ -95,6 +95,49 @@ class _ToolClient:
         self.chat = type("Chat", (), {"completions": _ToolCallCompletions()})()
 
 
+class _FakeEmbeddings:
+    def __init__(self, behavior="ok"):
+        self._b = behavior
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        if isinstance(self._b, Exception):
+            raise self._b
+        # 故意乱序返回,验证 provider 按 index 排序还原输入顺序
+        d1 = type("D", (), {"index": 1, "embedding": [0.4, 0.5]})()
+        d0 = type("D", (), {"index": 0, "embedding": [0.1, 0.2]})()
+        usage = type("U", (), {"prompt_tokens": 9})()
+        return type("R", (), {"data": [d1, d0], "usage": usage})()
+
+
+class _EmbedClient:
+    def __init__(self, behavior="ok"):
+        self.embeddings = _FakeEmbeddings(behavior)
+
+
+def test_embed_maps_vectors_in_index_order():
+    client = _EmbedClient("ok")
+    resp = OpenAIProvider(client).embed(
+        Target(provider="openai", model="text-embedding-3-small"),
+        ["a", "b"],
+        timeout=5.0,
+    )
+    assert resp.vectors == [[0.1, 0.2], [0.4, 0.5]]  # 按 index 排序
+    assert resp.input_tokens == 9
+    assert client.embeddings.last_kwargs["model"] == "text-embedding-3-small"
+    assert client.embeddings.last_kwargs["input"] == ["a", "b"]
+
+
+def test_embed_status_based_exception_routing():
+    err401 = type("E", (Exception,), {"status_code": 401})("auth")
+    with pytest.raises(TerminalError):
+        OpenAIProvider(_EmbedClient(err401)).embed(T, ["x"], timeout=5.0)
+    err503 = type("E", (Exception,), {"status_code": 503})("overloaded")
+    with pytest.raises(RetriableError):
+        OpenAIProvider(_EmbedClient(err503)).embed(T, ["x"], timeout=5.0)
+
+
 def test_tool_calling_anthropic_in_openai_out_anthropic_raw():
     """ops-agent 发 Anthropic 形 tools → OpenAIProvider 翻成 OpenAI 形发出;
     DeepSeek/OpenAI 回 tool_calls → raw 还原成 Anthropic 风格 tool_use,使消费者通用。"""

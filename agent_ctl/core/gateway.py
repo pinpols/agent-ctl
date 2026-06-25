@@ -20,6 +20,7 @@ from agent_ctl.errors import (
 from agent_ctl.models import (
     Attempt,
     CallRecord,
+    EmbeddingResponse,
     NormalizedRequest,
     NormalizedResponse,
     Target,
@@ -273,6 +274,193 @@ class Gateway:
         )
         self._log_capture(request, meta, "error", None, "all_failed", False, started)
         raise AllTargetsFailed(f"all targets failed for model {request.model!r}")
+
+    def embed(
+        self, model: str, inputs: list[str], metadata: dict | None = None
+    ) -> EmbeddingResponse:
+        """Embeddings 走与 invoke 同一治理:路由→熔断跳过→回退→留痕→捕获/指标。
+
+        不支持 embed 的目标(如 Anthropic)在回退链里被跳过(留痕 no_embed)。
+        embeddings 单次调用不做 per-target 重试(provider SDK 自带重试)。
+        """
+        started = time.monotonic()
+        meta = metadata or {}
+        try:
+            targets = self._router.resolve(model)
+        except Exception as exc:
+            self._capture_embed(
+                model, meta, started, None, [], None, "error", "routing", str(exc)
+            )
+            raise GatewayError(str(exc)) from exc
+        attempts: list[Attempt] = []
+        for idx, target in enumerate(targets):
+            if target.provider not in self._providers:
+                self._capture_embed(
+                    model,
+                    meta,
+                    started,
+                    target.name,
+                    attempts,
+                    None,
+                    "error",
+                    "provider",
+                    f"unregistered provider: {target.provider!r}",
+                )
+                raise GatewayError(
+                    f"unregistered provider: {target.provider!r} (model={model!r})"
+                )
+            provider = self._providers[target.provider]
+            embed_fn = getattr(provider, "embed", None)
+            if embed_fn is None:
+                # 该 provider 无 embeddings 能力 → 跳过试下一目标(留痕)
+                attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="no_embed",
+                        latency_ms=0,
+                        error="provider has no embeddings capability",
+                    )
+                )
+                continue
+            if not self._circuit.allow(target.provider):
+                attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="circuit_open",
+                        latency_ms=0,
+                        error="circuit open",
+                    )
+                )
+                continue
+            started_t = time.monotonic()
+            try:
+                resp = embed_fn(target, inputs, self._retry.timeout_s)
+                self._circuit.record_success(target.provider)
+                attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="success",
+                        latency_ms=int((time.monotonic() - started_t) * 1000),
+                    )
+                )
+                status = "success" if idx == 0 else "fallback_success"
+                self._capture_embed(
+                    model,
+                    meta,
+                    started,
+                    target.name,
+                    attempts,
+                    resp,
+                    status,
+                    None,
+                    None,
+                )
+                return resp
+            except TerminalError as exc:
+                self._circuit.record_failure(target.provider)
+                attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="terminal",
+                        latency_ms=int((time.monotonic() - started_t) * 1000),
+                        error=str(exc),
+                    )
+                )
+                self._capture_embed(
+                    model,
+                    meta,
+                    started,
+                    target.name,
+                    attempts,
+                    None,
+                    "error",
+                    "terminal",
+                    str(exc),
+                )
+                raise
+            except (RetriableError, TimeoutError) as exc:
+                self._circuit.record_failure(target.provider)
+                attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="retriable",
+                        latency_ms=int((time.monotonic() - started_t) * 1000),
+                        error=str(exc),
+                    )
+                )
+                continue
+        self._capture_embed(
+            model,
+            meta,
+            started,
+            None,
+            attempts,
+            None,
+            "error",
+            "all_failed",
+            attempts[-1].error if attempts else None,
+        )
+        raise AllTargetsFailed(f"all embedding targets failed for model {model!r}")
+
+    def _capture_embed(
+        self,
+        model,
+        meta,
+        started,
+        model_resolved,
+        attempts,
+        resp,
+        status,
+        error_type,
+        error_message,
+    ) -> None:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        input_tokens = resp.input_tokens if resp else 0
+        cost = None
+        if resp is not None and model_resolved:
+            try:
+                cost = self._cost.cost(model_resolved, input_tokens, 0)
+            except Exception as exc:
+                log.warning("embed cost calculation failed (cost=None): %s", exc)
+        metrics.record_call(
+            model_resolved=model_resolved,
+            status=status,
+            latency_ms=latency_ms,
+            input_tokens=input_tokens,
+            output_tokens=0,
+            cost_usd=cost,
+            cache_hit=False,
+            error_type=error_type,
+        )
+        if self._store is None:
+            return
+        try:
+            rec = CallRecord(
+                id=str(uuid.uuid4()),
+                ts=time.time(),
+                latency_ms=latency_ms,
+                consumer=meta.get("consumer", "unknown"),
+                call_site=meta.get("call_site"),
+                trace_id=meta.get("trace_id"),
+                model_requested=model,
+                params={"embed": True, "n_inputs": len(resp.vectors) if resp else 0},
+                model_resolved=model_resolved,
+                attempts=attempts,
+                input_tokens=input_tokens,
+                cost_usd=cost,
+                status=status,
+                error_type=error_type,
+                error_message_redacted=redact(error_message) if error_message else None,
+                last_error=redact(attempts[-1].error) if attempts else None,
+            )
+            self._store.save(rec)
+        except Exception as exc:  # fail-open
+            log.warning("embed capture failed (fail-open): %s", exc)
 
     def _safe_cache_get(self, key):
         try:
