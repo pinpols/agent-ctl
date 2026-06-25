@@ -6,7 +6,7 @@ import time
 
 from agent_ctl.config import load_config
 from agent_ctl.models import Target
-from agent_ctl.providers.catalog import PROVIDER_CATALOG
+from agent_ctl.providers.catalog import PROVIDER_CATALOG, provider_capabilities
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 # KNOWN_PROVIDERS 是静态 lint 集合:仅列举 agent_ctl 当前随包附带内建适配器的 provider 名。
@@ -52,10 +52,13 @@ def _cmd_cost(cfg, args) -> int:
 
 
 def _cmd_doctor(cfg, args) -> int:
-    problems = []
+    problems: list[str] = []
+    warnings: list[str] = []
+    cap_lines: list[str] = []
     if not cfg.routes:
         problems.append("routes 为空:至少配一个逻辑模型 → 目标链")
     for logical, targets in cfg.routes.items():
+        parsed: list[tuple[str, set[str]]] = []
         for spec in targets:
             try:
                 target = Target.parse(spec)
@@ -67,12 +70,34 @@ def _cmd_doctor(cfg, args) -> int:
                     f"route {logical!r} → {spec!r}: provider {target.provider!r} 无内建适配器 "
                     f"(内建适配器: {sorted(KNOWN_PROVIDERS)})"
                 )
+                continue
+            parsed.append((spec, provider_capabilities(target.provider)))
+        cap_lines.append(f"  route {logical!r}:")
+        for spec, caps in parsed:
+            cap_lines.append(f"    {spec:34} {','.join(sorted(caps)) or '(none)'}")
+        # 回退能力一致性:某能力部分目标支持、部分不支持 → 该能力的回退会静默失败
+        if len(parsed) > 1:
+            cap_sets = [c for _, c in parsed]
+            union: set[str] = set().union(*cap_sets)
+            common: set[str] = set(cap_sets[0])
+            for c in cap_sets[1:]:
+                common &= c
+            for cap in sorted(union - common):
+                lack = [s for s, c in parsed if cap not in c]
+                warnings.append(
+                    f"route {logical!r}: 能力 {cap!r} 在目标间不一致,回退到 {lack} 时该类请求会失败"
+                )
     if cfg.profile == "prod" and not cfg.prices:
         problems.append("prod profile 下 prices 为空:成本将全为 None")
     if problems:
         for p in problems:
             print("FAIL:", p)
         return 1
+    for w in warnings:
+        print("WARN:", w)
+    print("能力矩阵(chat/stream/embed/tools):")
+    for line in cap_lines:
+        print(line)
     print("OK: 配置自检通过")
     return 0
 

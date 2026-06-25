@@ -24,6 +24,25 @@ def test_catalog_covers_five_providers():
     assert all(kinds[p] == "openai" for p in ("openai", "deepseek", "qwen", "glm"))
 
 
+def test_provider_capabilities():
+    assert catalog.provider_capabilities("deepseek") == {
+        "chat",
+        "stream",
+        "tools",
+        "embed",
+    }
+    assert catalog.provider_capabilities("openai") == {
+        "chat",
+        "stream",
+        "tools",
+        "embed",
+    }
+    anthropic_caps = catalog.provider_capabilities("anthropic")
+    assert "embed" not in anthropic_caps  # 无 embeddings API
+    assert {"chat", "stream", "tools"} <= anthropic_caps
+    assert catalog.provider_capabilities("nope") == set()  # 未知 → 空集
+
+
 def test_build_providers_constructs_only_keyed(monkeypatch):
     # monkeypatch SDK 构造器,避免依赖真 anthropic/openai 安装
     monkeypatch.setattr(

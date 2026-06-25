@@ -123,6 +123,38 @@ def test_doctor_allows_catalog_provider(tmp_path, capsys, monkeypatch):
     assert "OK" in out
 
 
+def test_doctor_prints_capability_matrix(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"chat": ["deepseek/deepseek-chat"]},
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "能力矩阵" in out
+    assert "deepseek/deepseek-chat" in out
+    assert "embed" in out  # deepseek 走 OpenAI 兼容 → 有 embed
+
+
+def test_doctor_warns_on_inconsistent_fallback_capabilities(
+    tmp_path, capsys, monkeypatch
+):
+    # 回退链:openai(有 embed)→ anthropic(无 embed)→ embed 请求回退会失败
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"mix": ["openai/gpt-4o", "anthropic/claude-sonnet-4-6"]},
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    assert main(["doctor"]) == 0  # 警告不致失败
+    out = capsys.readouterr().out
+    assert "WARN" in out
+    assert "embed" in out  # 指出 embed 能力在目标间不一致
+
+
 def test_serve_rejects_non_local_without_token_before_provider_setup(
     tmp_path, capsys, monkeypatch
 ):

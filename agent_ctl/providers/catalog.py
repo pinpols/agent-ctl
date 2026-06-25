@@ -37,6 +37,21 @@ PROVIDER_CATALOG: dict[str, dict] = {
 }
 
 
+def provider_capabilities(name: str) -> set[str]:
+    """某 provider 的能力集(静态,按适配器类型推导,无需 api key / 不构造实例)。
+
+    chat/tools 所有适配器都支持;stream 由原生流式适配器支持;embed 仅 OpenAI 兼容家族
+    (Anthropic 无 embeddings API)。doctor 据此提示"路由目标能不能干这件事"。
+    """
+    kind = PROVIDER_CATALOG.get(name, {}).get("kind")
+    if kind not in ("anthropic", "openai"):
+        return set()  # 无内建适配器
+    caps = {"chat", "tools", "stream"}
+    if kind == "openai":
+        caps.add("embed")
+    return caps
+
+
 def available_providers(env: Mapping[str, str] | None = None) -> list[str]:
     """目录中 api key 已在环境里设置的 provider 名(按目录顺序)。纯函数,无 SDK 依赖。"""
     env_map = env if env is not None else os.environ
