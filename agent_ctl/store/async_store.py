@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import queue
 import threading
@@ -28,16 +29,23 @@ class AsyncCaptureStore:
         self._inner = inner
         self._q: queue.Queue = queue.Queue(maxsize=max_queue)
         self._dropped = 0
+        self._closed = False
         self._thread = threading.Thread(
             target=self._run, name="agent-ctl-capture", daemon=True
         )
         self._thread.start()
+        # 库形态一次性消费者(如 ops-agent 调一次就退出)不会显式 close →
+        # 注册 atexit 兜底落完 pending,避免丢尾记录 / 泄漏后台线程。close 幂等。
+        atexit.register(self.close)
 
     @property
     def dropped(self) -> int:
         return self._dropped
 
     def save(self, record: CallRecord) -> None:
+        if self._closed:  # 已关停 → 后台不再消费,丢弃避免无人取的积压
+            self._dropped += 1
+            return
         try:
             self._q.put_nowait(record)
         except queue.Full:
@@ -73,6 +81,10 @@ class AsyncCaptureStore:
         return self._inner.cost_summary(*args, **kwargs)
 
     def close(self) -> None:
+        """幂等关停:落完队列、停后台线程、关内层。atexit 与显式调用都安全。"""
+        if self._closed:
+            return
+        self._closed = True
         self._q.put(_STOP)
         self._thread.join(timeout=5.0)
         self._inner.close()

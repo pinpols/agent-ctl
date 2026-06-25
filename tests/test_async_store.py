@@ -76,3 +76,15 @@ def test_close_flushes_pending(tmp_path):
     store.close()  # 关停前应落完
     reopened = SqliteCaptureStore(str(tmp_path / "c.db"))
     assert len(reopened.list_recent(10)) == 3
+
+
+def test_close_is_idempotent_and_save_after_close_drops(tmp_path):
+    inner = SqliteCaptureStore(str(tmp_path / "c.db"))
+    store = AsyncCaptureStore(inner)
+    store.save(_rec(0))
+    store.close()
+    store.close()  # 二次 close 幂等(atexit 兜底也会再调一次)
+    store.save(_rec(1))  # 关停后 save 丢弃,不抛、不阻塞
+    assert store.dropped >= 1
+    reopened = SqliteCaptureStore(str(tmp_path / "c.db"))
+    assert len(reopened.list_recent(10)) == 1  # 只落了关停前那条
