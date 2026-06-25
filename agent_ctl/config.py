@@ -22,6 +22,13 @@ class Config(BaseModel):
     cache_enabled: bool = True
     cache_ttl_s: int = 600
     cache_tool_responses: bool = False
+    # 捕获落库移出请求主路径(后台线程 + 有界队列)。关闭则同步落库(测试/确定性可读)。
+    capture_async: bool = True
+    # 单次调用墙钟总预算(秒);跨"重试×回退×单目标超时"封顶,0=不封顶。
+    request_deadline_s: float = 120.0
+    # 成本预算闸(进程内累计,USD):per-consumer 上限 + 全局上限。空=不限。
+    budgets: dict[str, float] = {}
+    budget_global: float | None = None
     # 熔断:某 provider 连续失败达阈值则开路冷却,期间回退跳过它。0=关闭。
     circuit_failure_threshold: int = 5
     circuit_cooldown_s: float = 30.0

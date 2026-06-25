@@ -86,9 +86,9 @@ def _cmd_serve(cfg, args) -> int:
     from agent_ctl.core.cost import CostMeter
     from agent_ctl.core.gateway import Gateway
     from agent_ctl.core.router import Router
+    from agent_ctl.client.gateway_client import build_store
     from agent_ctl.providers.catalog import available_providers, build_providers
     from agent_ctl.server.app import build_server
-    from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
     if args.host not in {"127.0.0.1", "localhost", "::1"} and not args.api_token:
         print("FAIL: non-local serve requires --api-token")
@@ -106,7 +106,7 @@ def _cmd_serve(cfg, args) -> int:
         router=Router(cfg.routes, cfg.model_aliases),
         providers=providers,
         cost_meter=CostMeter(cfg.prices),
-        store=SqliteCaptureStore(cfg.db_path),
+        store=build_store(cfg),
         cache=MemoryCache() if cfg.cache_enabled else None,
         retry=cfg.retry,
         cache_enabled=cfg.cache_enabled,

@@ -10,7 +10,14 @@ from agent_ctl.core.router import Router
 from agent_ctl.models import EmbeddingResponse, NormalizedRequest, NormalizedResponse
 from agent_ctl.models import Target
 from agent_ctl.providers.base import Provider
+from agent_ctl.store.async_store import AsyncCaptureStore
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
+
+
+def build_store(config: Config):
+    """按配置构造捕获存储:默认 SQLite,capture_async 时套后台异步写装饰器。"""
+    store = SqliteCaptureStore(config.db_path)
+    return AsyncCaptureStore(store) if config.capture_async else store
 
 
 def validate_routes(
@@ -56,7 +63,7 @@ class GatewayClient:
             router=Router(config.routes, config.model_aliases),
             providers=providers,
             cost_meter=CostMeter(config.prices),
-            store=SqliteCaptureStore(config.db_path),
+            store=build_store(config),
             cache=MemoryCache() if config.cache_enabled else None,
             retry=config.retry,
             cache_enabled=config.cache_enabled,
