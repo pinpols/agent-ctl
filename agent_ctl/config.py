@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, NonNegativeFloat
 
 
 class RetryConfig(BaseModel):
@@ -18,22 +18,22 @@ class Config(BaseModel):
     routes: dict[str, list[str]] = {"default": ["anthropic/claude-sonnet-4-6"]}
     # 裸模型名 → "provider/model"(OpenAI 兼容 server 用,如 deepseek-chat→deepseek/deepseek-chat)
     model_aliases: dict[str, str] = {}
-    prices: dict[str, tuple[float, float]] = {}
+    prices: dict[str, tuple[NonNegativeFloat, NonNegativeFloat]] = {}
     cache_enabled: bool = True
-    cache_ttl_s: int = 600
+    cache_ttl_s: int = Field(default=600, ge=0)
     cache_tool_responses: bool = False
     # 缓存条目硬上界(LRU 淘汰),防长驻 server 内存只增不减。0=不限(不建议)。
-    cache_max_entries: int = 10_000
+    cache_max_entries: int = Field(default=10_000, ge=0)
     # 捕获落库移出请求主路径(后台线程 + 有界队列)。关闭则同步落库(测试/确定性可读)。
     capture_async: bool = True
     # 单次调用墙钟总预算(秒);跨"重试×回退×单目标超时"封顶,0=不封顶。
-    request_deadline_s: float = 120.0
+    request_deadline_s: float = Field(default=120.0, ge=0.0)
     # 成本预算闸(进程内累计,USD):per-consumer 上限 + 全局上限。空=不限。
-    budgets: dict[str, float] = {}
-    budget_global: float | None = None
+    budgets: dict[str, NonNegativeFloat] = {}
+    budget_global: NonNegativeFloat | None = None
     # 熔断:某 provider 连续失败达阈值则开路冷却,期间回退跳过它。0=关闭。
-    circuit_failure_threshold: int = 5
-    circuit_cooldown_s: float = 30.0
+    circuit_failure_threshold: int = Field(default=5, ge=0)
+    circuit_cooldown_s: float = Field(default=30.0, ge=0.0)
     profile: str = "dev"
     db_path: str = ".agent_ctl/capture.db"
     retry: RetryConfig = RetryConfig()

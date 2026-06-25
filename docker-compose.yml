@@ -1,0 +1,32 @@
+services:
+  agent-ctl:
+    build: .
+    image: agent-ctl:0.1.0
+    ports:
+      - "127.0.0.1:8400:8400"
+    environment:
+      AGENT_CTL_PROFILE: prod
+      AGENT_CTL_API_TOKEN: ${AGENT_CTL_API_TOKEN:?set AGENT_CTL_API_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      GLM_API_KEY: ${GLM_API_KEY:-}
+    command:
+      - agent-ctl
+      - --config
+      - /config/agent_ctl.yaml
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8400"
+      - --api-token
+      - ${AGENT_CTL_API_TOKEN:?set AGENT_CTL_API_TOKEN}
+    volumes:
+      - ./docker/agent_ctl.yaml:/config/agent_ctl.yaml:ro
+      - agent_ctl_data:/data
+    restart: unless-stopped
+
+volumes:
+  agent_ctl_data:

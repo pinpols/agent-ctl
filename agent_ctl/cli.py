@@ -5,6 +5,7 @@ import json
 import sys
 import time
 
+from agent_ctl import __version__
 from agent_ctl.config import load_config
 from agent_ctl.models import Target
 from agent_ctl.providers.catalog import PROVIDER_CATALOG, provider_capabilities
@@ -77,6 +78,19 @@ def _cmd_export(cfg, args) -> int:
     return 0
 
 
+def _cmd_config_schema(cfg, args) -> int:
+    from agent_ctl.config import Config
+
+    schema = Config.model_json_schema()
+    text = json.dumps(schema, indent=2, ensure_ascii=False)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    else:
+        print(text)
+    return 0
+
+
 def _cmd_doctor(cfg, args) -> int:
     problems: list[str] = []
     warnings: list[str] = []
@@ -142,8 +156,10 @@ def _cmd_serve(cfg, args) -> int:
     from agent_ctl.providers.catalog import available_providers, build_providers
     from agent_ctl.server.app import build_server
 
-    if args.host not in {"127.0.0.1", "localhost", "::1"} and not args.api_token:
-        print("FAIL: non-local serve requires --api-token")
+    if args.host not in {"127.0.0.1", "localhost", "::1"} and (
+        not args.api_token or args.api_token == "change-me"
+    ):
+        print("FAIL: non-local serve requires a non-default --api-token")
         return 1
     avail = available_providers()
     if not avail:
@@ -179,6 +195,11 @@ def _cmd_serve(cfg, args) -> int:
     return 0
 
 
+def _cmd_version(cfg, args) -> int:
+    print(__version__)
+    return 0
+
+
 def _parse_since(value: str | None) -> float | None:
     if value is None:
         return None
@@ -193,8 +214,10 @@ _COMMANDS = {
     "captures": _cmd_captures,
     "cost": _cmd_cost,
     "export": _cmd_export,
+    "config-schema": _cmd_config_schema,
     "doctor": _cmd_doctor,
     "serve": _cmd_serve,
+    "version": _cmd_version,
 }
 
 
@@ -221,7 +244,10 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--status")
     p_exp.add_argument("--model")
     p_exp.add_argument("--since", help="Unix timestamp, Nh, or Nd")
+    p_schema = sub.add_parser("config-schema", help="输出 Config JSON Schema")
+    p_schema.add_argument("--out", help="输出文件;省略则写 stdout")
     sub.add_parser("doctor")
+    sub.add_parser("version")
     p_serve = sub.add_parser("serve")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8400)
@@ -229,5 +255,9 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--max-request-bytes", type=int, default=1_000_000)
     p_serve.add_argument("--rate-limit-per-minute", type=int, default=120)
     args = parser.parse_args(argv)
-    cfg = load_config(args.config)
+    cfg = (
+        None
+        if args.command in {"version", "config-schema"}
+        else load_config(args.config)
+    )
     return _COMMANDS[args.command](cfg, args)

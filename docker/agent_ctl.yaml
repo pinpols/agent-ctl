@@ -1,0 +1,28 @@
+routes:
+  default: [anthropic/claude-sonnet-4-6, openai/gpt-4o-mini]
+model_aliases:
+  claude-sonnet-4-6: anthropic/claude-sonnet-4-6
+  gpt-4o-mini: openai/gpt-4o-mini
+  deepseek-chat: deepseek/deepseek-chat
+  qwen-max: qwen/qwen-max
+  glm-4: glm/glm-4
+prices:
+  claude-sonnet-4-6: [3.0, 15.0]
+  gpt-4o-mini: [0.15, 0.6]
+cache_enabled: true
+cache_ttl_s: 600
+cache_tool_responses: false
+cache_max_entries: 10000
+capture_async: true
+circuit_failure_threshold: 5
+circuit_cooldown_s: 30
+request_deadline_s: 120
+budgets: {}
+budget_global: null
+profile: prod
+db_path: /data/capture.db
+retry:
+  max_attempts_per_target: 2
+  base_backoff_s: 0.2
+  jitter_ratio: 0.2
+  timeout_s: 60

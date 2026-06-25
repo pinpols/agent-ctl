@@ -123,3 +123,6 @@ Captures are stored in SQLite at `db_path`. The store initializes schema metadat
 - Tool-call responses are not cached by default because they often depend on external state.
 - Retries use exponential backoff with jitter to avoid synchronized retry bursts.
 - Real-provider integration tests should be run manually with API keys and low `max_tokens`; unit tests avoid network calls.
+- See [operations.md](docs/operations.md) for Docker Compose, release, rollback, and runtime checks.
+- See [configuration.md](docs/configuration.md) for config schema generation and migration policy.
+- See [release.md](docs/release.md) for versioning, tagging, and real-provider smoke tests.

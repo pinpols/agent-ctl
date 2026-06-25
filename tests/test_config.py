@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agent_ctl.config import RetryConfig, load_config
+from agent_ctl.config import Config, RetryConfig, load_config
 
 
 def test_load_config_from_yaml(tmp_path):
@@ -49,3 +49,21 @@ def test_retry_config_rejects_invalid_values():
         RetryConfig(timeout_s=0)
     with pytest.raises(ValidationError):
         RetryConfig(jitter_ratio=1.1)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"prices": {"bad": [-1.0, 1.0]}},
+        {"cache_ttl_s": -1},
+        {"cache_max_entries": -1},
+        {"request_deadline_s": -1.0},
+        {"budgets": {"consumer": -1.0}},
+        {"budget_global": -1.0},
+        {"circuit_failure_threshold": -1},
+        {"circuit_cooldown_s": -1.0},
+    ],
+)
+def test_config_rejects_negative_production_knobs(kwargs):
+    with pytest.raises(ValidationError):
+        Config(**kwargs)

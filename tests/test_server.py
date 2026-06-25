@@ -433,6 +433,23 @@ def test_server_rejects_large_request_even_with_low_content_length_header():
     assert r.status_code == 413
 
 
+def test_embeddings_rejects_large_request_even_with_low_content_length_header():
+    c = TestClient(
+        build_server(
+            FakeGateway(embed_resp=EmbeddingResponse(vectors=[[0.1]], input_tokens=1)),
+            now=lambda: 1234,
+            max_request_bytes=30,
+        )
+    )
+    body = b'{"model":"m","input":"' + b"x" * 100 + b'"}'
+    r = c.post(
+        "/v1/embeddings",
+        content=body,
+        headers={"Content-Type": "application/json", "Content-Length": "1"},
+    )
+    assert r.status_code == 413
+
+
 def test_server_rate_limits_by_client():
     c = TestClient(
         build_server(

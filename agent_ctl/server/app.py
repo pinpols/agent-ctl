@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import time
 import uuid
@@ -186,6 +187,30 @@ def _error_body(message: str, err_type: str) -> dict:
     return {"error": {"message": message, "type": err_type, "code": err_type}}
 
 
+def _request_too_large_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=413,
+        content=_error_body("request too large", "request_too_large"),
+    )
+
+
+def _invalid_json_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content=_error_body("invalid JSON body", "invalid_request_error"),
+    )
+
+
+async def _read_json_body(request: Request, max_request_bytes: int):
+    raw = await request.body()
+    if len(raw) > max_request_bytes:
+        return None, _request_too_large_response()
+    try:
+        return json.loads(raw), None
+    except (JSONDecodeError, UnicodeDecodeError):
+        return None, _invalid_json_response()
+
+
 def _gateway_error_response(exc: GatewayError) -> JSONResponse:
     """网关异常 → OpenAI 形 error 体 + 合适 HTTP 码(终态 400 / 预算 402 / 全失败 502)。"""
     if isinstance(exc, TerminalError):
@@ -283,19 +308,9 @@ def build_server(
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        raw = await request.body()
-        if len(raw) > max_request_bytes:
-            return JSONResponse(
-                status_code=413,
-                content=_error_body("request too large", "request_too_large"),
-            )
-        try:
-            body = await request.json()
-        except JSONDecodeError:
-            return JSONResponse(
-                status_code=400,
-                content=_error_body("invalid JSON body", "invalid_request_error"),
-            )
+        body, error_response = await _read_json_body(request, max_request_bytes)
+        if error_response is not None:
+            return error_response
         if not isinstance(body, dict):
             return JSONResponse(
                 status_code=400,
@@ -342,13 +357,9 @@ def build_server(
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request):
-        try:
-            body = await request.json()
-        except JSONDecodeError:
-            return JSONResponse(
-                status_code=400,
-                content=_error_body("invalid JSON body", "invalid_request_error"),
-            )
+        body, error_response = await _read_json_body(request, max_request_bytes)
+        if error_response is not None:
+            return error_response
         if not isinstance(body, dict) or not body.get("model"):
             return JSONResponse(
                 status_code=400,
@@ -392,6 +403,7 @@ def _auth_error(request, api_token: str | None) -> dict | None:
     if not api_token:
         return None
     expected = f"Bearer {api_token}"
-    if request.headers.get("authorization") != expected:
+    actual = request.headers.get("authorization") or ""
+    if not hmac.compare_digest(actual.encode(), expected.encode()):
         return _error_body("missing or invalid bearer token", "unauthorized")
     return None

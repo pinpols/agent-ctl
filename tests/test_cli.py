@@ -119,6 +119,27 @@ def test_export_to_file(tmp_path, monkeypatch):
     assert json.loads(lines[0])["id"] == "x"
 
 
+def test_config_schema_command_outputs_schema(capsys, monkeypatch):
+    monkeypatch.setattr("agent_ctl.cli.load_config", lambda path=None: Config())
+    assert main(["config-schema"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert schema["title"] == "Config"
+    assert "routes" in schema["properties"]
+
+
+def test_config_schema_command_writes_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_ctl.cli.load_config", lambda path=None: Config())
+    out_file = tmp_path / "schema.json"
+    assert main(["config-schema", "--out", str(out_file)]) == 0
+    assert json.loads(out_file.read_text(encoding="utf-8"))["title"] == "Config"
+
+
+def test_version_command(capsys, monkeypatch):
+    monkeypatch.setattr("agent_ctl.cli.load_config", lambda path=None: Config())
+    assert main(["version"]) == 0
+    assert capsys.readouterr().out.strip()
+
+
 def test_doctor_flags_empty_routes(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(
         "agent_ctl.cli.load_config",
@@ -205,3 +226,21 @@ def test_serve_rejects_non_local_without_token_before_provider_setup(
     out = capsys.readouterr().out
     assert rc == 1
     assert "api-token" in out
+
+
+def test_serve_rejects_non_local_default_token_before_provider_setup(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(db_path=str(tmp_path / "c.db")),
+    )
+
+    def boom():
+        raise AssertionError("provider setup should not be reached")
+
+    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", boom)
+    rc = main(["serve", "--host", "0.0.0.0", "--api-token", "change-me"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "non-default" in out
