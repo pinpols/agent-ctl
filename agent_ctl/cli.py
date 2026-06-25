@@ -113,6 +113,7 @@ def _cmd_serve(cfg, args) -> int:
         cache_ttl_s=cfg.cache_ttl_s,
         cache_tool_responses=cfg.cache_tool_responses,
         circuit=CircuitBreaker(cfg.circuit_failure_threshold, cfg.circuit_cooldown_s),
+        request_deadline_s=cfg.request_deadline_s,
     )
     app = build_server(
         gateway,

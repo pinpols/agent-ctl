@@ -72,6 +72,7 @@ class GatewayClient:
             circuit=CircuitBreaker(
                 config.circuit_failure_threshold, config.circuit_cooldown_s
             ),
+            request_deadline_s=config.request_deadline_s,
         )
         return cls(gateway)
 

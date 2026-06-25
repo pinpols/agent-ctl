@@ -45,6 +45,7 @@ class Gateway:
         cache_ttl_s: int = 600,
         cache_tool_responses: bool = False,
         circuit: CircuitBreaker | None = None,
+        request_deadline_s: float = 0.0,
     ) -> None:
         self._router = router
         self._providers = providers
@@ -56,6 +57,7 @@ class Gateway:
         self._cache_ttl_s = cache_ttl_s
         self._cache_tool_responses = cache_tool_responses
         self._circuit = circuit or CircuitBreaker(failure_threshold=0)  # 默认关闭
+        self._deadline_s = request_deadline_s  # 单次调用墙钟总预算;0=不封顶
 
         # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError。
         # 只校验 routes(必经);aliases 是可选项(共享配置里可能含本消费者没 key 的 provider),
@@ -76,13 +78,21 @@ class Gateway:
         target: Target,
         request: NormalizedRequest,
         attempts: list[Attempt],
+        deadline: float | None = None,
     ) -> NormalizedResponse:
-        """对单目标尝试(含重试)。每次尝试都 append 到调用方的 attempts(成功/失败均留痕)。"""
+        """对单目标尝试(含重试)。每次尝试都 append 到调用方的 attempts(成功/失败均留痕)。
+
+        deadline(墙钟绝对时刻):每次尝试把单次超时压到 min(配置超时, 剩余预算);
+        预算耗尽则不再发起新尝试。
+        """
         last_exc: Exception = RetriableError("no attempt made")
         for n in range(self._retry.max_attempts_per_target):
+            timeout = self._timeout_within(deadline)
+            if timeout is None:
+                raise RetriableError("request deadline exceeded")
             started = time.monotonic()
             try:
-                resp = provider.invoke(target, request, self._retry.timeout_s)
+                resp = provider.invoke(target, request, timeout)
                 attempts.append(
                     Attempt(
                         provider=target.provider,
@@ -118,6 +128,18 @@ class Gateway:
                 if n < self._retry.max_attempts_per_target - 1:
                     time.sleep(self._backoff_s(n))
         raise RetriableError(str(last_exc))
+
+    def _deadline_for(self, started: float) -> float | None:
+        return started + self._deadline_s if self._deadline_s > 0 else None
+
+    def _timeout_within(self, deadline: float | None) -> float | None:
+        """本次尝试可用超时:无 deadline → 配置超时;有则压到剩余预算;已超 → None。"""
+        if deadline is None:
+            return self._retry.timeout_s
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return min(self._retry.timeout_s, remaining)
 
     def _backoff_s(self, attempt_index: int) -> float:
         base = self._retry.base_backoff_s * (2**attempt_index)
@@ -177,7 +199,20 @@ class Gateway:
             self._log_capture(request, meta, "error", None, "routing", False, started)
             raise GatewayError(str(exc)) from exc
         all_attempts: list[Attempt] = []  # 共享:_invoke_target 往里 append,失败也留痕
+        deadline = self._deadline_for(started)
         for idx, target in enumerate(targets):
+            if deadline is not None and time.monotonic() >= deadline:
+                # 墙钟总预算耗尽 → 停止回退,余下目标不再尝试(留痕)
+                all_attempts.append(
+                    Attempt(
+                        provider=target.provider,
+                        model=target.model,
+                        outcome="deadline",
+                        latency_ms=0,
+                        error="request deadline exceeded",
+                    )
+                )
+                break
             if target.provider not in self._providers:
                 # '/'-直连到未注册 provider:抛类型化错误而非裸 KeyError
                 self._capture(
@@ -213,7 +248,9 @@ class Gateway:
                 continue
             provider = self._providers[target.provider]
             try:
-                resp = self._invoke_target(provider, target, request, all_attempts)
+                resp = self._invoke_target(
+                    provider, target, request, all_attempts, deadline
+                )
                 self._circuit.record_success(target.provider)
                 status = "success" if idx == 0 else "fallback_success"
                 if cache_key:
