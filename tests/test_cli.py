@@ -1,3 +1,5 @@
+import json
+
 from agent_ctl.cli import main
 from agent_ctl.config import Config
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
@@ -83,6 +85,38 @@ def test_captures_command_filters_and_json(tmp_path, capsys, monkeypatch):
     assert rc == 0
     assert '"id": "a"' in out
     assert '"id": "b"' not in out
+
+
+def test_export_streams_jsonl_in_time_order(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "c.db")
+    store = SqliteCaptureStore(db)
+    store.save(CallRecord(id="b", ts=20, consumer="ops", status="success"))
+    store.save(CallRecord(id="a", ts=10, consumer="ops", status="success"))
+    store.save(CallRecord(id="c", ts=30, consumer="web", status="error"))
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config", lambda path=None: Config(db_path=db)
+    )
+    rc = main(["export", "--consumer", "ops"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert [r["id"] for r in lines] == ["a", "b"]  # 时序升序、按 consumer 过滤
+    assert all(r["consumer"] == "ops" for r in lines)
+
+
+def test_export_to_file(tmp_path, monkeypatch):
+    db = str(tmp_path / "c.db")
+    SqliteCaptureStore(db).save(
+        CallRecord(id="x", ts=1, consumer="t", status="success")
+    )
+    out_file = tmp_path / "traces.jsonl"
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config", lambda path=None: Config(db_path=db)
+    )
+    assert main(["export", "--out", str(out_file)]) == 0
+    lines = out_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["id"] == "x"
 
 
 def test_doctor_flags_empty_routes(tmp_path, capsys, monkeypatch):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 
 from agent_ctl.config import load_config
@@ -48,6 +49,31 @@ def _cmd_cost(cfg, args) -> int:
             group_by=args.group_by,
         )
     print(json.dumps(summary, indent=2))
+    return 0
+
+
+def _cmd_export(cfg, args) -> int:
+    """流式导出捕获为 JSONL(逐行一条 CallRecord),供 eval/replay。stdout 保持纯净。"""
+    since = _parse_since(args.since)
+    out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
+    n = 0
+    try:
+        with SqliteCaptureStore(cfg.db_path) as store:
+            for rec in store.iter_all(
+                consumer=args.consumer,
+                status=args.status,
+                model=args.model,
+                since=since,
+                ascending=True,  # 时序,replay 友好
+            ):
+                out.write(
+                    json.dumps(rec.model_dump(mode="json"), ensure_ascii=False) + "\n"
+                )
+                n += 1
+    finally:
+        if args.out:
+            out.close()
+    print(f"exported {n} records", file=sys.stderr)  # 计数走 stderr,不污染 JSONL
     return 0
 
 
@@ -166,6 +192,7 @@ def _parse_since(value: str | None) -> float | None:
 _COMMANDS = {
     "captures": _cmd_captures,
     "cost": _cmd_cost,
+    "export": _cmd_export,
     "doctor": _cmd_doctor,
     "serve": _cmd_serve,
 }
@@ -188,6 +215,12 @@ def main(argv: list[str] | None = None) -> int:
     p_cost.add_argument("--model")
     p_cost.add_argument("--since", help="Unix timestamp, Nh, or Nd")
     p_cost.add_argument("--group-by", choices=["model", "consumer", "status", "day"])
+    p_exp = sub.add_parser("export", help="流式导出捕获为 JSONL(eval/replay)")
+    p_exp.add_argument("--out", help="输出文件;省略则写 stdout")
+    p_exp.add_argument("--consumer")
+    p_exp.add_argument("--status")
+    p_exp.add_argument("--model")
+    p_exp.add_argument("--since", help="Unix timestamp, Nh, or Nd")
     sub.add_parser("doctor")
     p_serve = sub.add_parser("serve")
     p_serve.add_argument("--host", default="127.0.0.1")

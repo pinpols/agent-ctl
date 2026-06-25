@@ -135,6 +135,39 @@ class SqliteCaptureStore:
             ).fetchall()
         return [CallRecord(**json.loads(r["doc"])) for r in rows]
 
+    def iter_all(
+        self,
+        *,
+        consumer: str | None = None,
+        status: str | None = None,
+        model: str | None = None,
+        since: float | None = None,
+        ascending: bool = True,
+    ):
+        """流式逐条产出匹配记录(按 ts 时序),供大批量导出/replay。
+
+        不把全表读进内存(对照 list_recent):file 库另开只读连接惰性游标迭代(WAL 允许
+        并发读,不抢写锁);:memory: 库无法跨连接,退回锁内快照迭代。
+        """
+        where, params = self._filters(
+            consumer=consumer, status=status, model=model, since=since
+        )
+        order = "ASC" if ascending else "DESC"
+        sql = f"SELECT doc FROM call_record{where} ORDER BY ts {order}"
+        if self._path == ":memory:":
+            with self._lock:
+                rows = self._conn.execute(sql, params).fetchall()
+            for row in rows:
+                yield CallRecord(**json.loads(row["doc"]))
+            return
+        conn = sqlite3.connect(self._path)
+        conn.row_factory = sqlite3.Row
+        try:
+            for row in conn.execute(sql, params):  # 游标惰性取,真流式
+                yield CallRecord(**json.loads(row["doc"]))
+        finally:
+            conn.close()
+
     def cost_summary(
         self,
         *,

@@ -57,6 +57,14 @@ Cost summary:
 
 Available `cost --group-by` values are `model`, `consumer`, `status`, and `day`.
 
+Streaming export of captures to JSONL (time-ordered, for eval/replay; streams via a separate read connection without holding the write lock):
+
+```bash
+.venv/bin/agent-ctl --config agent_ctl.yaml export --consumer ops --since 7d > traces.jsonl
+```
+
+`doctor` reports a per-route capability matrix (chat/stream/embed/tools, derived statically per adapter) and warns when a fallback chain mixes targets with different capabilities (e.g. an `embed` request would fail when it falls back to a provider with no embeddings API).
+
 ## Library Usage
 
 ```python

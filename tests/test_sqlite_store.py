@@ -161,3 +161,21 @@ def test_store_context_manager_closes_connection(tmp_path):
 
     with pytest.raises(Exception):
         store.cost_summary()
+
+
+def test_iter_all_streams_in_time_order_and_filters(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    store.save(_rec("b", 0.0, ts=20))
+    store.save(_rec("a", 0.0, ts=10))
+    store.save(_rec("c", 0.0, consumer="other", ts=30))
+    got = list(store.iter_all(consumer="t"))
+    assert [r.id for r in got] == ["a", "b"]  # 升序时序 + 过滤
+    desc = list(store.iter_all(ascending=False))
+    assert [r.id for r in desc] == ["c", "b", "a"]
+
+
+def test_iter_all_memory_db():
+    store = SqliteCaptureStore(":memory:")
+    store.save(_rec("a", 0.0, ts=1))
+    store.save(_rec("b", 0.0, ts=2))
+    assert [r.id for r in store.iter_all()] == ["a", "b"]
