@@ -230,17 +230,7 @@ class Gateway:
         all_attempts: list[Attempt] = []  # 共享:_invoke_target 往里 append,失败也留痕
         deadline = self._deadline_for(started)
         for idx, target in enumerate(targets):
-            if deadline is not None and time.monotonic() >= deadline:
-                # 墙钟总预算耗尽 → 停止回退,余下目标不再尝试(留痕)
-                all_attempts.append(
-                    Attempt(
-                        provider=target.provider,
-                        model=target.model,
-                        outcome="deadline",
-                        latency_ms=0,
-                        error="request deadline exceeded",
-                    )
-                )
+            if self._deadline_exceeded(target, deadline, all_attempts):
                 break
             if target.provider not in self._providers:
                 # '/'-直连到未注册 provider:抛类型化错误而非裸 KeyError
@@ -263,17 +253,7 @@ class Gateway:
                 raise GatewayError(
                     f"unregistered provider: {target.provider!r} (model={request.model!r})"
                 )
-            if not self._circuit.allow(target.provider):
-                # 该 provider 熔断开路 → 跳过,试下一目标(留痕)
-                all_attempts.append(
-                    Attempt(
-                        provider=target.provider,
-                        model=target.model,
-                        outcome="circuit_open",
-                        latency_ms=0,
-                        error="circuit open",
-                    )
-                )
+            if self._circuit_blocked(target, all_attempts):
                 continue
             provider = self._providers[target.provider]
             try:
@@ -368,10 +348,7 @@ class Gateway:
         deadline = self._deadline_for(started)
         attempts: list[Attempt] = []
         for idx, target in enumerate(targets):
-            if deadline is not None and time.monotonic() >= deadline:
-                attempts.append(
-                    self._attempt(target, "deadline", 0, "deadline exceeded")
-                )
+            if self._deadline_exceeded(target, deadline, attempts):
                 break
             if target.provider not in self._providers:
                 self._capture_stream_error(
@@ -384,10 +361,7 @@ class Gateway:
                     target.name,
                 )
                 raise GatewayError(f"unregistered provider: {target.provider!r}")
-            if not self._circuit.allow(target.provider):
-                attempts.append(
-                    self._attempt(target, "circuit_open", 0, "circuit open")
-                )
+            if self._circuit_blocked(target, attempts):
                 continue
             provider = self._providers[target.provider]
             t0 = time.monotonic()
@@ -548,6 +522,28 @@ class Gateway:
             error=error,
         )
 
+    # ── 共享治理守卫(invoke / invoke_stream / embed 三个 runner 共用)──────────
+    # 抽出避免三处各写一遍:此前 deadline 守卫、circuit-skip 散布多处,F2/F3 类修复
+    # 不得不在多个 runner 重复改。集中到一处后,守卫语义只有一个真相源。
+
+    def _deadline_exceeded(
+        self, target: Target, deadline: float | None, attempts: list[Attempt]
+    ) -> bool:
+        """到达目标前墙钟总预算已耗尽 → 留 deadline 痕,返回 True(调用方应 break)。"""
+        if deadline is not None and time.monotonic() >= deadline:
+            attempts.append(
+                self._attempt(target, "deadline", 0, "request deadline exceeded")
+            )
+            return True
+        return False
+
+    def _circuit_blocked(self, target: Target, attempts: list[Attempt]) -> bool:
+        """该 provider 熔断开路 → 留 circuit_open 痕,返回 True(调用方应 continue 跳过)。"""
+        if not self._circuit.allow(target.provider):
+            attempts.append(self._attempt(target, "circuit_open", 0, "circuit open"))
+            return True
+        return False
+
     @staticmethod
     def _chunks_of(resp: NormalizedResponse) -> Iterator[StreamChunk]:
         if resp.text:
@@ -630,10 +626,7 @@ class Gateway:
         attempts: list[Attempt] = []
         deadline = self._deadline_for(started)
         for idx, target in enumerate(targets):
-            if deadline is not None and time.monotonic() >= deadline:
-                attempts.append(
-                    self._attempt(target, "deadline", 0, "request deadline exceeded")
-                )
+            if self._deadline_exceeded(target, deadline, attempts):
                 break
             if target.provider not in self._providers:
                 self._capture_embed(
@@ -655,25 +648,12 @@ class Gateway:
             if embed_fn is None:
                 # 该 provider 无 embeddings 能力 → 跳过试下一目标(留痕)
                 attempts.append(
-                    Attempt(
-                        provider=target.provider,
-                        model=target.model,
-                        outcome="no_embed",
-                        latency_ms=0,
-                        error="provider has no embeddings capability",
+                    self._attempt(
+                        target, "no_embed", 0, "provider has no embeddings capability"
                     )
                 )
                 continue
-            if not self._circuit.allow(target.provider):
-                attempts.append(
-                    Attempt(
-                        provider=target.provider,
-                        model=target.model,
-                        outcome="circuit_open",
-                        latency_ms=0,
-                        error="circuit open",
-                    )
-                )
+            if self._circuit_blocked(target, attempts):
                 continue
             embed_timeout = self._timeout_within(deadline)
             if embed_timeout is None:
