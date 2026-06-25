@@ -1,13 +1,17 @@
 # tests/test_gateway_embed.py
+import time
+
 import pytest
 
 from agent_ctl.config import RetryConfig
+from agent_ctl.core.budget import BudgetGuard
 from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
 from agent_ctl.core.gateway import Gateway
 from agent_ctl.core.router import Router
 from agent_ctl.errors import (
     AllTargetsFailed,
+    BudgetExceeded,
     GatewayError,
     RetriableError,
     TerminalError,
@@ -137,3 +141,54 @@ def test_embed_unknown_model_raises_routing(tmp_path):
         gw.embed("missing", ["x"], {"consumer": "t"})
     rec = store.list_recent(1)[0]
     assert rec.error_type == "routing"
+
+
+# ── 覆盖补强:embed 内预算/未注册直连/deadline ──────────────────────────────
+
+
+def test_embed_budget_exceeded_before_call(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["emb/m"]}),
+        providers={"emb": FakeEmbedProvider(["ok"])},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RETRY,
+        budget=BudgetGuard(per_consumer={"t": 0.0}),  # cap 0 → 首次即超
+    )
+    with pytest.raises(BudgetExceeded):
+        gw.embed("default", ["x"], {"consumer": "t"})
+    rec = store.list_recent(1)[0]
+    assert rec.status == "error" and rec.error_type == "budget"
+
+
+def test_embed_direct_unregistered_provider(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = _gw({"emb": FakeEmbedProvider(["ok"])}, {"default": ["emb/m"]}, store)
+    with pytest.raises(GatewayError):
+        gw.embed("nope/x", ["x"], {"consumer": "t"})
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "provider"
+
+
+def test_embed_deadline_break_stops_fallback(tmp_path):
+    """第一目标耗时超 deadline → 第二目标在循环顶被 deadline 守卫跳过。"""
+
+    class SlowEmbedFail:
+        def embed(self, target, inputs, timeout):
+            time.sleep(0.06)
+            raise RetriableError("slow")
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["a/m", "b/m"]}),
+        providers={"a": SlowEmbedFail(), "b": FakeEmbedProvider(["ok"])},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, timeout_s=60.0),
+        request_deadline_s=0.05,
+    )
+    with pytest.raises(AllTargetsFailed):
+        gw.embed("default", ["x"], {"consumer": "t"})
+    rec = store.list_recent(1)[0]
+    assert rec.attempts[-1].outcome == "deadline"
