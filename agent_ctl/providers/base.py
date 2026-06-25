@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
 
 from agent_ctl.models import (
     EmbeddingResponse,
     NormalizedRequest,
     NormalizedResponse,
+    StreamChunk,
     Target,
 )
 
@@ -14,6 +16,19 @@ class Provider(Protocol):
     def invoke(
         self, target: Target, request: NormalizedRequest, timeout: float
     ) -> NormalizedResponse: ...
+
+
+@runtime_checkable
+class StreamingProvider(Protocol):
+    """可选能力:原生流式。stream() 逐块产出文本增量,末块 done=True 带最终计量。
+
+    无此能力的 provider 在 invoke_stream 里退化为缓冲式(跑非流式再切块)。
+    开流前的失败可回退下一目标;一旦首块已出则提交该目标,不再回退。
+    """
+
+    def stream(
+        self, target: Target, request: NormalizedRequest, timeout: float
+    ) -> Iterator[StreamChunk]: ...
 
 
 @runtime_checkable

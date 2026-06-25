@@ -1,11 +1,14 @@
 # agent_ctl/providers/openai_provider.py
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from agent_ctl.errors import RetriableError, TerminalError
 from agent_ctl.models import (
     EmbeddingResponse,
     NormalizedRequest,
     NormalizedResponse,
+    StreamChunk,
     Target,
 )
 from agent_ctl.providers.tooltrans import (
@@ -47,9 +50,9 @@ class OpenAIProvider:
     def __init__(self, client) -> None:
         self._client = client
 
-    def invoke(
+    def _chat_kwargs(
         self, target: Target, request: NormalizedRequest, timeout: float
-    ) -> NormalizedResponse:
+    ) -> dict:
         # 消息:Anthropic 形(多轮工具循环含 tool_use/tool_result 块)→ OpenAI 形。
         # system 是独立字段,规整为首条 role=system 消息。
         messages = anthropic_messages_to_openai(request.messages)
@@ -68,8 +71,15 @@ class OpenAIProvider:
             kwargs["tools"] = anthropic_tools_to_openai(request.tools)
         if request.tool_choice is not None:
             kwargs["tool_choice"] = anthropic_tool_choice_to_openai(request.tool_choice)
+        return kwargs
+
+    def invoke(
+        self, target: Target, request: NormalizedRequest, timeout: float
+    ) -> NormalizedResponse:
         try:
-            resp = self._client.chat.completions.create(**kwargs)
+            resp = self._client.chat.completions.create(
+                **self._chat_kwargs(target, request, timeout)
+            )
         except Exception as exc:
             raise _typed_error(exc) from exc
 
@@ -87,6 +97,46 @@ class OpenAIProvider:
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
             raw=raw,
+        )
+
+    def stream(
+        self, target: Target, request: NormalizedRequest, timeout: float
+    ) -> Iterator[StreamChunk]:
+        """原生流式:stream=True + include_usage(末块仅含 usage,choices 为空)。
+
+        连接前异常(create 抛)→ 类型化错误,可被网关在开流前回退;迭代中(已开流)
+        异常按原样向上抛,由网关捕获记错(此时已发字节,无法回退)。
+        """
+        kwargs = self._chat_kwargs(target, request, timeout)
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _typed_error(exc) from exc
+
+        finish_reason: str | None = None
+        input_tokens = 0
+        output_tokens = 0
+        for chunk in resp:
+            choices = getattr(chunk, "choices", None) or []
+            if choices:
+                delta = getattr(choices[0], "delta", None)
+                content = getattr(delta, "content", None) if delta else None
+                fr = getattr(choices[0], "finish_reason", None)
+                if fr:
+                    finish_reason = fr
+                if content:
+                    yield StreamChunk(text=content)
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        yield StreamChunk(
+            done=True,
+            finish_reason=finish_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
     def embed(

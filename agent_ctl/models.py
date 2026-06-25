@@ -42,6 +42,16 @@ class NormalizedResponse(BaseModel):
     raw: dict | None = None
 
 
+class StreamChunk(BaseModel):
+    """流式增量。text=本次增量文本;done=True 的终块携带 finish_reason + 最终 token 计量。"""
+
+    text: str = ""
+    finish_reason: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    done: bool = False
+
+
 class EmbeddingResponse(BaseModel):
     vectors: list[list[float]]
     input_tokens: int = 0

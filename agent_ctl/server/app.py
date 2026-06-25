@@ -90,17 +90,18 @@ def to_openai_embeddings(resp, requested_model: str) -> dict:
     }
 
 
-def _sse_stream(resp: NormalizedResponse, requested_model: str, created: int):
-    """把已完成的响应切成 OpenAI 兼容 SSE chunk(缓冲式:无 TTFB 收益,仅协议兼容)。
+def _sse_from_chunks(first, gen, requested_model: str, created: int):
+    """把网关的 StreamChunk 流逐块编码为 OpenAI 兼容 SSE 帧(真·流式,逐块下发)。
 
-    真·逐 token 流式需各 provider 原生 streaming 且绕过治理层(成本/捕获/重试均依赖完整
-    响应),代价远大于收益;此处以一段 content delta 还原 stream=true 客户端契约。
+    first 是 server 预拉的首块(用于把"开流前"错误降级为普通 HTTP 状态);其余从 gen
+    续取。中途异常会终止流(已发字节无法改 HTTP 状态)。
     """
+    import itertools
     import json as _json
 
     cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
-    def chunk(delta: dict, finish_reason=None) -> str:
+    def frame(delta: dict, finish_reason=None) -> str:
         payload = {
             "id": cid,
             "object": "chat.completion.chunk",
@@ -110,15 +111,38 @@ def _sse_stream(resp: NormalizedResponse, requested_model: str, created: int):
         }
         return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    yield chunk({"role": "assistant"})
-    if resp.text:
-        yield chunk({"content": resp.text})
-    yield chunk({}, finish_reason=resp.finish_reason or "stop")
+    yield frame({"role": "assistant"})
+    final_fr = "stop"
+    for chunk in itertools.chain([] if first is None else [first], gen):
+        if chunk is None:
+            continue
+        if chunk.done:
+            final_fr = chunk.finish_reason or "stop"
+        elif chunk.text:
+            yield frame({"content": chunk.text})
+    yield frame({}, finish_reason=final_fr)
     yield "data: [DONE]\n\n"
 
 
 def _error_body(message: str, err_type: str) -> dict:
     return {"error": {"message": message, "type": err_type, "code": err_type}}
+
+
+def _gateway_error_response(exc: GatewayError) -> JSONResponse:
+    """网关异常 → OpenAI 形 error 体 + 合适 HTTP 码(终态 400 / 预算 402 / 全失败 502)。"""
+    if isinstance(exc, TerminalError):
+        return JSONResponse(
+            status_code=400, content=_error_body(str(exc), "terminal_error")
+        )
+    if isinstance(exc, BudgetExceeded):
+        return JSONResponse(
+            status_code=402, content=_error_body(str(exc), "budget_exceeded")
+        )
+    if isinstance(exc, AllTargetsFailed):
+        return JSONResponse(
+            status_code=502, content=_error_body(str(exc), "upstream_error")
+        )
+    return JSONResponse(status_code=400, content=_error_body(str(exc), "gateway_error"))
 
 
 def build_server(
@@ -224,34 +248,28 @@ def build_server(
                 status_code=400,
                 content=_error_body(str(exc), "invalid_request_error"),
             )
-        # invoke 在流式前完成(治理:捕获/成本/熔断/重试都依赖完整响应),
-        # 故所有错误仍以普通 HTTP 状态返回,流式仅切分已完成响应。
-        try:
-            resp = gateway.invoke(req)
-        except TerminalError as exc:
-            return JSONResponse(
-                status_code=400, content=_error_body(str(exc), "terminal_error")
-            )
-        except BudgetExceeded as exc:
-            return JSONResponse(
-                status_code=402, content=_error_body(str(exc), "budget_exceeded")
-            )
-        except AllTargetsFailed as exc:
-            return JSONResponse(
-                status_code=502, content=_error_body(str(exc), "upstream_error")
-            )
-        except GatewayError as exc:
-            return JSONResponse(
-                status_code=400, content=_error_body(str(exc), "gateway_error")
-            )
+        created = clock()
         if body.get("stream"):
             from fastapi.responses import StreamingResponse
 
+            # 预拉首块:把"开流前"错误(预算/路由/终态/全失败)降级为普通 HTTP 状态;
+            # 首块已出后再发生的中途错误只能终止流(已发字节无法改状态码)。
+            gen = gateway.invoke_stream(req)
+            try:
+                first = next(gen)
+            except StopIteration:
+                first = None
+            except GatewayError as exc:
+                return _gateway_error_response(exc)
             return StreamingResponse(
-                _sse_stream(resp, body["model"], clock()),
+                _sse_from_chunks(first, gen, body["model"], created),
                 media_type="text/event-stream",
             )
-        return to_openai_response(resp, body["model"], clock())
+        try:
+            resp = gateway.invoke(req)
+        except GatewayError as exc:
+            return _gateway_error_response(exc)
+        return to_openai_response(resp, body["model"], created)
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request):
@@ -291,22 +309,8 @@ def build_server(
             resp = gateway.embed(
                 body["model"], inputs, {"consumer": "openai-compat-server"}
             )
-        except TerminalError as exc:
-            return JSONResponse(
-                status_code=400, content=_error_body(str(exc), "terminal_error")
-            )
-        except BudgetExceeded as exc:
-            return JSONResponse(
-                status_code=402, content=_error_body(str(exc), "budget_exceeded")
-            )
-        except AllTargetsFailed as exc:
-            return JSONResponse(
-                status_code=502, content=_error_body(str(exc), "upstream_error")
-            )
         except GatewayError as exc:
-            return JSONResponse(
-                status_code=400, content=_error_body(str(exc), "gateway_error")
-            )
+            return _gateway_error_response(exc)
         return to_openai_embeddings(resp, body["model"])
 
     return app

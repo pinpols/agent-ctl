@@ -94,6 +94,47 @@ def test_invoke_populates_raw_when_sdk_supports_model_dump():
     }
 
 
+def _ev(etype, **attrs):
+    return type("Ev", (), {"type": etype, **attrs})()
+
+
+class _StreamMessages:
+    def create(self, **kwargs):
+        assert kwargs["stream"] is True
+        msg = type("M", (), {"usage": type("U", (), {"input_tokens": 9})()})()
+        text_delta = type("D", (), {"type": "text_delta", "text": "Hi "})()
+        text_delta2 = type("D", (), {"type": "text_delta", "text": "there"})()
+        msg_delta = type("D", (), {"stop_reason": "end_turn"})()
+        return iter(
+            [
+                _ev("message_start", message=msg),
+                _ev("content_block_delta", delta=text_delta),
+                _ev("content_block_delta", delta=text_delta2),
+                _ev(
+                    "message_delta",
+                    delta=msg_delta,
+                    usage=type("U", (), {"output_tokens": 6})(),
+                ),
+                _ev("message_stop"),
+            ]
+        )
+
+
+def test_stream_parses_anthropic_events():
+    client = type("C", (), {"messages": _StreamMessages()})()
+    chunks = list(AnthropicProvider(client).stream(T, REQ, timeout=5.0))
+    assert [c.text for c in chunks if not c.done] == ["Hi ", "there"]
+    done = chunks[-1]
+    assert done.done and done.finish_reason == "end_turn"
+    assert done.input_tokens == 9 and done.output_tokens == 6
+
+
+def test_stream_connect_error_is_typed():
+    p = AnthropicProvider(_FakeClientStatus(503))
+    with pytest.raises(RetriableError):
+        list(p.stream(T, REQ, timeout=5.0))
+
+
 def test_classify_status():
     assert classify_status(429) == "retriable"
     assert classify_status(529) == "retriable"

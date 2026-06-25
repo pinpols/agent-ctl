@@ -1,10 +1,12 @@
 # agent_ctl/core/gateway.py
 from __future__ import annotations
 
+import itertools
 import logging
 import random
 import time
 import uuid
+from collections.abc import Iterator
 
 from agent_ctl.config import RetryConfig
 from agent_ctl.core.budget import BudgetGuard
@@ -25,6 +27,7 @@ from agent_ctl.models import (
     EmbeddingResponse,
     NormalizedRequest,
     NormalizedResponse,
+    StreamChunk,
     Target,
 )
 from agent_ctl.obs import metrics
@@ -335,6 +338,220 @@ class Gateway:
         )
         self._log_capture(request, meta, "error", None, "all_failed", False, started)
         raise AllTargetsFailed(f"all targets failed for model {request.model!r}")
+
+    def invoke_stream(self, request: NormalizedRequest) -> Iterator[StreamChunk]:
+        """真·流式:逐块产出文本增量,末块 done=True 带最终计量。
+
+        治理一致:预算闸/路由/熔断/deadline 照旧;**开流前**失败可回退下一目标,
+        一旦首块已出即提交该目标不再回退(已发字节无法回退,业界一致)。无原生
+        stream 能力的 provider 退化为缓冲式(跑非流式再切块,保留全部治理)。
+        捕获在流结束后按累计文本+计量落一条记录(与非流式同一 _capture)。
+        """
+        started = time.monotonic()
+        meta = request.metadata or {}
+        consumer = meta.get("consumer", "unknown")
+        try:
+            self._budget.check(consumer)
+        except BudgetExceeded as exc:
+            self._capture_stream_error(request, meta, started, [], "budget", str(exc))
+            raise
+        try:
+            targets = self._router.resolve(request.model)
+        except Exception as exc:
+            self._capture_stream_error(request, meta, started, [], "routing", str(exc))
+            raise GatewayError(str(exc)) from exc
+
+        deadline = self._deadline_for(started)
+        attempts: list[Attempt] = []
+        for idx, target in enumerate(targets):
+            if deadline is not None and time.monotonic() >= deadline:
+                attempts.append(
+                    self._attempt(target, "deadline", 0, "deadline exceeded")
+                )
+                break
+            if target.provider not in self._providers:
+                self._capture_stream_error(
+                    request,
+                    meta,
+                    started,
+                    attempts,
+                    "provider",
+                    f"unregistered provider: {target.provider!r}",
+                    target.name,
+                )
+                raise GatewayError(f"unregistered provider: {target.provider!r}")
+            if not self._circuit.allow(target.provider):
+                attempts.append(
+                    self._attempt(target, "circuit_open", 0, "circuit open")
+                )
+                continue
+            provider = self._providers[target.provider]
+            t0 = time.monotonic()
+            stream_fn = getattr(provider, "stream", None)
+
+            if stream_fn is None:
+                # 退化:缓冲式(含重试),成功切块产出;失败按类型回退/抛
+                try:
+                    resp = self._invoke_target(
+                        provider, target, request, attempts, deadline
+                    )
+                except TerminalError as exc:
+                    self._circuit.record_failure(target.provider)
+                    self._capture_stream_error(
+                        request,
+                        meta,
+                        started,
+                        attempts,
+                        "terminal",
+                        str(exc),
+                        target.name,
+                    )
+                    raise
+                except (RetriableError, TimeoutError):
+                    self._circuit.record_failure(target.provider)
+                    continue
+                self._circuit.record_success(target.provider)
+                self._capture_stream_ok(
+                    request, meta, started, target, attempts, resp, idx
+                )
+                yield from self._chunks_of(resp)
+                return
+
+            # 真流式:先拉首块,允许开流前回退
+            timeout = self._timeout_within(deadline)
+            if timeout is None:
+                attempts.append(
+                    self._attempt(target, "deadline", 0, "deadline exceeded")
+                )
+                break
+            gen = stream_fn(target, request, timeout)
+            try:
+                first: StreamChunk | None = next(gen)
+            except StopIteration:
+                first = None
+            except TerminalError as exc:
+                self._circuit.record_failure(target.provider)
+                attempts.append(self._attempt(target, "terminal", t0, str(exc)))
+                self._capture_stream_error(
+                    request, meta, started, attempts, "terminal", str(exc), target.name
+                )
+                raise
+            except (RetriableError, TimeoutError) as exc:
+                self._circuit.record_failure(target.provider)
+                attempts.append(self._attempt(target, "retriable", t0, str(exc)))
+                continue  # 开流前失败 → 回退下一目标
+
+            # 已开流 → 提交此 target,后续不回退
+            self._circuit.record_success(target.provider)
+            parts: list[str] = []
+            fr: str | None = None
+            it = ot = 0
+            try:
+                for chunk in itertools.chain([] if first is None else [first], gen):
+                    if chunk is None:
+                        continue
+                    if chunk.done:
+                        fr, it, ot = (
+                            chunk.finish_reason,
+                            chunk.input_tokens,
+                            chunk.output_tokens,
+                        )
+                    elif chunk.text:
+                        parts.append(chunk.text)
+                        yield chunk
+            except Exception as exc:  # 流中途失败:已发字节无法回退 → 记错并抛
+                attempts.append(self._attempt(target, "stream_error", t0, str(exc)))
+                self._capture_stream_error(
+                    request, meta, started, attempts, "stream", str(exc), target.name
+                )
+                raise GatewayError(str(exc)) from exc
+            attempts.append(self._attempt(target, "success", t0, None))
+            resp = NormalizedResponse(
+                text="".join(parts),
+                finish_reason=fr,
+                input_tokens=it,
+                output_tokens=ot,
+            )
+            self._capture_stream_ok(request, meta, started, target, attempts, resp, idx)
+            yield StreamChunk(
+                done=True, finish_reason=fr, input_tokens=it, output_tokens=ot
+            )
+            return
+
+        self._capture_stream_error(
+            request,
+            meta,
+            started,
+            attempts,
+            "all_failed",
+            attempts[-1].error if attempts else None,
+        )
+        raise AllTargetsFailed(f"all stream targets failed for model {request.model!r}")
+
+    def _attempt(self, target: Target, outcome: str, t0: float, error: str | None):
+        latency = int((time.monotonic() - t0) * 1000) if t0 else 0
+        return Attempt(
+            provider=target.provider,
+            model=target.model,
+            outcome=outcome,
+            latency_ms=latency,
+            error=error,
+        )
+
+    @staticmethod
+    def _chunks_of(resp: NormalizedResponse) -> Iterator[StreamChunk]:
+        if resp.text:
+            yield StreamChunk(text=resp.text)
+        yield StreamChunk(
+            done=True,
+            finish_reason=resp.finish_reason,
+            input_tokens=resp.input_tokens,
+            output_tokens=resp.output_tokens,
+        )
+
+    def _capture_stream_ok(self, request, meta, started, target, attempts, resp, idx):
+        status = "success" if idx == 0 else "fallback_success"
+        self._capture(
+            request,
+            meta,
+            started,
+            model_resolved=target.name,
+            attempts=attempts,
+            resp=resp,
+            status=status,
+            cache_hit=False,
+            cache_key=None,
+            error_type=None,
+            error_message=None,
+        )
+        self._log_capture(request, meta, status, target.name, None, False, started)
+
+    def _capture_stream_error(
+        self,
+        request,
+        meta,
+        started,
+        attempts,
+        error_type,
+        error_message,
+        model_resolved=None,
+    ):
+        self._capture(
+            request,
+            meta,
+            started,
+            model_resolved=model_resolved,
+            attempts=attempts,
+            resp=None,
+            status="error",
+            cache_hit=False,
+            cache_key=None,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        self._log_capture(
+            request, meta, "error", model_resolved, error_type, False, started
+        )
 
     def embed(
         self, model: str, inputs: list[str], metadata: dict | None = None

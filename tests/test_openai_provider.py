@@ -138,6 +138,62 @@ def test_embed_status_based_exception_routing():
         OpenAIProvider(_EmbedClient(err503)).embed(T, ["x"], timeout=5.0)
 
 
+class _StreamCompletions:
+    def __init__(self):
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+
+        def _delta(content, fr=None):
+            ch = type(
+                "Ch",
+                (),
+                {"delta": type("D", (), {"content": content})(), "finish_reason": fr},
+            )()
+            return type("K", (), {"choices": [ch], "usage": None})()
+
+        def _final():
+            usage = type("U", (), {"prompt_tokens": 11, "completion_tokens": 4})()
+            return type("K", (), {"choices": [], "usage": usage})()
+
+        return iter([_delta("Hel"), _delta("lo", fr="stop"), _final()])
+
+
+class _StreamClient:
+    def __init__(self):
+        self.chat = type("Chat", (), {"completions": _StreamCompletions()})()
+
+
+def test_stream_parses_deltas_and_usage():
+    client = _StreamClient()
+    chunks = list(OpenAIProvider(client).stream(T, REQ, timeout=5.0))
+    assert [c.text for c in chunks if not c.done] == ["Hel", "lo"]
+    done = chunks[-1]
+    assert done.done and done.finish_reason == "stop"
+    assert done.input_tokens == 11 and done.output_tokens == 4
+    # 流式请求带 stream + include_usage
+    assert client.chat.completions.last_kwargs["stream"] is True
+    assert client.chat.completions.last_kwargs["stream_options"] == {
+        "include_usage": True
+    }
+
+
+def test_stream_connect_error_is_typed():
+    err503 = type("E", (Exception,), {"status_code": 503})("overloaded")
+
+    class _BoomClient:
+        def __init__(self):
+            comp = type("C", (), {"create": self._boom})()
+            self.chat = type("Chat", (), {"completions": comp})()
+
+        def _boom(self, **kwargs):
+            raise err503
+
+    with pytest.raises(RetriableError):
+        list(OpenAIProvider(_BoomClient()).stream(T, REQ, timeout=5.0))
+
+
 def test_tool_calling_anthropic_in_openai_out_anthropic_raw():
     """ops-agent 发 Anthropic 形 tools → OpenAIProvider 翻成 OpenAI 形发出;
     DeepSeek/OpenAI 回 tool_calls → raw 还原成 Anthropic 风格 tool_use,使消费者通用。"""

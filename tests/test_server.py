@@ -1,18 +1,33 @@
 from fastapi.testclient import TestClient
 
 from agent_ctl.errors import AllTargetsFailed, BudgetExceeded, TerminalError
-from agent_ctl.models import EmbeddingResponse, NormalizedRequest, NormalizedResponse
+from agent_ctl.models import (
+    EmbeddingResponse,
+    NormalizedRequest,
+    NormalizedResponse,
+    StreamChunk,
+)
 from agent_ctl.server.app import build_server, to_normalized, to_openai_response
 
 
 class FakeGateway:
     """记录收到的 NormalizedRequest,按预设返回/抛错。"""
 
-    def __init__(self, resp=None, exc=None, embed_resp=None, embed_exc=None):
+    def __init__(
+        self,
+        resp=None,
+        exc=None,
+        embed_resp=None,
+        embed_exc=None,
+        stream_chunks=None,
+        stream_exc=None,
+    ):
         self._resp = resp
         self._exc = exc
         self._embed_resp = embed_resp
         self._embed_exc = embed_exc
+        self._stream_chunks = stream_chunks  # list[str] 文本增量
+        self._stream_exc = stream_exc
         self.last_request = None
         self.last_embed = None
 
@@ -21,6 +36,21 @@ class FakeGateway:
         if self._exc:
             raise self._exc
         return self._resp
+
+    def invoke_stream(self, request: NormalizedRequest):
+        self.last_request = request
+        if self._stream_exc:
+            raise self._stream_exc
+        for text in self._stream_chunks or ([self._resp.text] if self._resp else []):
+            if text:
+                yield StreamChunk(text=text)
+        r = self._resp
+        yield StreamChunk(
+            done=True,
+            finish_reason=(r.finish_reason if r else None),
+            input_tokens=(r.input_tokens if r else 0),
+            output_tokens=(r.output_tokens if r else 0),
+        )
 
     def embed(self, model, inputs, metadata=None) -> EmbeddingResponse:
         self.last_embed = (model, inputs)
@@ -140,11 +170,13 @@ def test_chat_completions_bad_max_tokens_400():
     assert "max_tokens" in r.json()["error"]["message"]
 
 
-def test_chat_completions_streaming_emits_sse_chunks():
+def test_chat_completions_streaming_emits_multiple_sse_chunks():
+    """真流式:多段文本增量 → 多个 content 帧逐块下发。"""
     gw = FakeGateway(
         resp=NormalizedResponse(
-            text="你好", finish_reason="stop", input_tokens=5, output_tokens=2
-        )
+            text="", finish_reason="stop", input_tokens=5, output_tokens=2
+        ),
+        stream_chunks=["你", "好", "世界"],
     )
     c = _client(gw)
     r = c.post(
@@ -160,19 +192,28 @@ def test_chat_completions_streaming_emits_sse_chunks():
     text = r.text
     assert '"object": "chat.completion.chunk"' in text
     assert '"role": "assistant"' in text
-    assert '"content": "你好"' in text
+    assert text.count('"content":') == 3  # 三段增量各一帧
     assert '"finish_reason": "stop"' in text
     assert text.rstrip().endswith("data: [DONE]")
 
 
-def test_streaming_error_returns_http_status_not_stream():
-    """invoke 在流式前完成 → 错误仍以普通 HTTP 状态返回(非流式 502)。"""
-    c = _client(FakeGateway(exc=AllTargetsFailed("all down")))
+def test_streaming_pre_open_error_returns_http_status_not_stream():
+    """开流前的错误(预拉首块时抛)降级为普通 HTTP 状态(502),而非半截流。"""
+    c = _client(FakeGateway(stream_exc=AllTargetsFailed("all down")))
     r = c.post(
         "/v1/chat/completions",
         json={"model": "openai/gpt-4o", "messages": [], "stream": True},
     )
     assert r.status_code == 502
+
+
+def test_streaming_budget_error_maps_402():
+    c = _client(FakeGateway(stream_exc=BudgetExceeded("over budget")))
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-4o", "messages": [], "stream": True},
+    )
+    assert r.status_code == 402
 
 
 # ── /v1/embeddings ──────────────────────────────────────────
