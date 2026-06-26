@@ -2,6 +2,8 @@
 
 > 日期:2026-06-25。状态:已采纳(Accepted)。
 > 关联:supersedes 子项目1设计 §2、子项目2设计 §3 的若干"非目标"。
+> 后续:治理硬化与审核整改见 [ADR-0002](0002-governance-and-audit-hardening.md);
+> 当前架构整体描述见 [architecture.md](../design/architecture.md)。
 
 ## 背景
 

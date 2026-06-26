@@ -2,9 +2,11 @@
 
 > 日期:2026-06-24。延续子项目1(网关+捕获)。本文件定义"对齐到业界标准"的 server 形态。
 >
-> ⚠️ **2026-06-25 更新**:本文 §3「不做」清单已被 [ADR-0001](../../adr/0001-gateway-maturity-and-hardening.md)
-> 全面取代——**streaming**(真·passthrough SSE)、**`/v1/embeddings`**、**跨 provider 工具归一**、
-> **鉴权**(server token)均已实现;另加 `/metrics`、熔断、deadline、预算闸(402)。以 ADR-0001 为准。
+> ⚠️ **历史文档(仅存 MVP 设计意图)**。系统**当前架构**以
+> [architecture.md](../../design/architecture.md) 为权威;决策演进见
+> [ADR-0001](../../adr/0001-gateway-maturity-and-hardening.md) 与
+> [ADR-0002](../../adr/0002-governance-and-audit-hardening.md)。本文 §3「不做」清单
+> (streaming/embeddings/工具归一/鉴权 + /metrics/熔断/deadline/预算)均已实现。
 
 ## 1. 背景与对齐决策
 
