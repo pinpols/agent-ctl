@@ -3,30 +3,17 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from agent_ctl.errors import RetriableError, TerminalError
 from agent_ctl.models import (
     NormalizedRequest,
     NormalizedResponse,
     StreamChunk,
     Target,
 )
+from agent_ctl.providers._http import classify_status, typed_error
 
-
-def classify_status(status: int) -> str:
-    """HTTP 状态 → retriable/terminal。429 与 5xx 可重试,其余 4xx 终态。"""
-    if status == 429 or status >= 500:
-        return "retriable"
-    return "terminal"
-
-
-def _typed_error(exc: Exception) -> Exception:
-    """SDK 异常 → 类型化网关错误。有状态码按 4xx/5xx 分类,无状态码(网络)按可重试。"""
-    status = getattr(exc, "status_code", None)
-    if status is None:
-        return RetriableError(str(exc))
-    if classify_status(status) == "retriable":
-        return RetriableError(str(exc))
-    return TerminalError(str(exc))
+# 兼容旧 import 点(测试/外部)：classify_status 经本模块再导出。
+__all__ = ["AnthropicProvider", "classify_status"]
+_typed_error = typed_error
 
 
 class AnthropicProvider:

@@ -14,6 +14,7 @@ from agent_ctl.errors import (
     TerminalError,
 )
 from agent_ctl.models import Attempt, NormalizedRequest, NormalizedResponse, StreamChunk
+from agent_ctl.providers.base import StreamingProvider
 
 
 class StreamRunnerMixin:
@@ -59,9 +60,9 @@ class StreamRunnerMixin:
             if self._circuit_blocked(target, attempts):
                 continue
             provider = self._providers[target.provider]
-            stream_fn = getattr(provider, "stream", None)
 
-            if stream_fn is None:
+            if not isinstance(provider, StreamingProvider):
+                # 无原生流式能力 → 缓冲式降级(跑非流式再切块)
                 yielded = yield from self._invoke_buffered_stream_target(
                     provider, target, request, attempts, deadline, started, meta, idx
                 )
@@ -70,7 +71,7 @@ class StreamRunnerMixin:
                 continue
 
             yielded = yield from self._invoke_native_stream_target(
-                stream_fn, target, request, attempts, deadline, started, meta, idx
+                provider.stream, target, request, attempts, deadline, started, meta, idx
             )
             if yielded:
                 return

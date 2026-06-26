@@ -11,6 +11,7 @@ from agent_ctl.errors import (
     TerminalError,
 )
 from agent_ctl.models import Attempt, EmbeddingResponse
+from agent_ctl.providers.base import EmbeddingProvider
 
 
 class EmbeddingRunnerMixin:
@@ -59,14 +60,14 @@ class EmbeddingRunnerMixin:
                     f"unregistered provider: {target.provider!r} (model={model!r})"
                 )
             provider = self._providers[target.provider]
-            embed_fn = getattr(provider, "embed", None)
-            if embed_fn is None:
+            if not isinstance(provider, EmbeddingProvider):
                 attempts.append(
                     self._attempt(
                         target, "no_embed", 0, "provider has no embeddings capability"
                     )
                 )
                 continue
+            embed_fn = provider.embed
             try:
                 self._capturer.ensure_price(target.name)
             except TerminalError as exc:

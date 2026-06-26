@@ -76,6 +76,10 @@ class AsyncCaptureStore:
         self.flush()
         return self._inner.list_recent(*args, **kwargs)
 
+    def iter_all(self, *args, **kwargs):
+        self.flush()
+        return self._inner.iter_all(*args, **kwargs)
+
     def cost_summary(self, *args, **kwargs):
         self.flush()
         return self._inner.cost_summary(*args, **kwargs)
