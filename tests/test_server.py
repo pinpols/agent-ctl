@@ -431,8 +431,16 @@ def test_metrics_can_use_separate_token():
             rate_limit_per_minute=0,
         )
     )
-    assert c.get("/metrics", headers={"Authorization": "Bearer api-secret"}).status_code == 401
-    assert c.get("/metrics", headers={"Authorization": "Bearer metrics-secret"}).status_code == 200
+    assert (
+        c.get("/metrics", headers={"Authorization": "Bearer api-secret"}).status_code
+        == 401
+    )
+    assert (
+        c.get(
+            "/metrics", headers={"Authorization": "Bearer metrics-secret"}
+        ).status_code
+        == 200
+    )
 
 
 def test_metrics_auth_failures_consume_rate_limit():
@@ -445,8 +453,12 @@ def test_metrics_auth_failures_consume_rate_limit():
             rate_limit_per_minute=1,
         )
     )
-    assert c.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert c.get("/metrics", headers={"Authorization": "Bearer wrong2"}).status_code == 429
+    assert (
+        c.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    )
+    assert (
+        c.get("/metrics", headers={"Authorization": "Bearer wrong2"}).status_code == 429
+    )
 
 
 def test_metrics_falls_back_to_api_token_when_no_metrics_token():
@@ -459,7 +471,10 @@ def test_metrics_falls_back_to_api_token_when_no_metrics_token():
         )
     )
     assert c.get("/metrics").status_code == 401
-    assert c.get("/metrics", headers={"Authorization": "Bearer api-secret"}).status_code == 200
+    assert (
+        c.get("/metrics", headers={"Authorization": "Bearer api-secret"}).status_code
+        == 200
+    )
 
 
 def test_server_rejects_large_request():
@@ -548,8 +563,14 @@ def test_auth_failures_consume_rate_limit():
             rate_limit_per_minute=1,
         )
     )
-    assert c.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert c.get("/v1/models", headers={"Authorization": "Bearer wrong2"}).status_code == 429
+    assert (
+        c.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code
+        == 401
+    )
+    assert (
+        c.get("/v1/models", headers={"Authorization": "Bearer wrong2"}).status_code
+        == 429
+    )
 
 
 def test_healthz_skips_auth_and_rate_limit():
@@ -574,6 +595,104 @@ def test_rate_limit_can_trust_forwarded_for():
             trust_proxy_headers=True,
         )
     )
-    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
-    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 200
-    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 429
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 200
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 429
+    )
+
+
+# ── 深审 5 修回归 ───────────────────────────────────────────
+
+
+def test_to_normalized_merges_multiple_system_messages():
+    """⑤ 多条 system 全部合并(漏合并会把第 2 条当普通消息发给 Anthropic 报错)。"""
+    req = to_normalized(
+        {
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "A"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "B"},
+            ],
+        }
+    )
+    assert req.system == "A\n\nB"
+    assert req.messages == [
+        {"role": "user", "content": "hi"}
+    ]  # system 不再漏进 messages
+
+
+def test_to_normalized_consumer_from_user_field():
+    """② consumer 取自 OpenAI `user` 字段 → per-consumer 预算/归因生效。"""
+    assert (
+        to_normalized({"model": "m", "messages": [], "user": "alice"}).metadata[
+            "consumer"
+        ]
+        == "alice"
+    )
+    assert (
+        to_normalized({"model": "m", "messages": []}).metadata["consumer"]
+        == "openai-compat-server"
+    )
+
+
+def test_streaming_emits_usage_frame():
+    """① 流式末尾发 usage 帧(stream_options.include_usage 客户端据此拿 token)。"""
+    gw = FakeGateway(
+        resp=NormalizedResponse(
+            text="hi", finish_reason="stop", input_tokens=7, output_tokens=3
+        ),
+        stream_chunks=["hi"],
+    )
+    c = _client(gw)
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    assert r.status_code == 200
+    text = r.text
+    assert '"usage"' in text
+    assert '"prompt_tokens": 7' in text
+    assert '"completion_tokens": 3' in text
+    assert '"total_tokens": 10' in text
+    assert text.rstrip().endswith("data: [DONE]")
+
+
+def test_direct_model_blocked_when_disallowed():
+    """③ allow_direct_models=False 时,provider/model 直连未登记目标被拒(防绕过路由白名单)。"""
+    gw = FakeGateway(resp=NormalizedResponse(text="ok"))
+    app = build_server(gw, models=["chat"], now=lambda: 1, allow_direct_models=False)
+    c = TestClient(app)
+    # 直连未登记目标 → 400
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert r.status_code == 400
+    assert "not allowed" in r.json()["error"]["message"]
+    # 登记的逻辑名 → 放行
+    ok = c.post(
+        "/v1/chat/completions",
+        json={"model": "chat", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert ok.status_code == 200
+
+
+def test_direct_model_allowed_by_default():
+    """默认 allow_direct_models=True(库形态 build_server)不影响现有直连用法。"""
+    gw = FakeGateway(resp=NormalizedResponse(text="ok"))
+    c = _client(gw)  # 默认 True
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert r.status_code == 200

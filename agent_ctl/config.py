@@ -34,6 +34,9 @@ class Config(BaseModel):
     # 熔断:某 provider 连续失败达阈值则开路冷却,期间回退跳过它。0=关闭。
     circuit_failure_threshold: int = Field(default=5, ge=0)
     circuit_cooldown_s: float = Field(default=30.0, ge=0.0)
+    # server 是否允许请求用 "provider/model" 直连未在 routes/aliases 登记的目标。
+    # 默认禁(成本治理):否则调用方可绕过路由白名单调任意已注册 provider 的任意模型。
+    allow_direct_models: bool = False
     profile: str = "dev"
     db_path: str = ".agent_ctl/capture.db"
     retry: RetryConfig = RetryConfig()

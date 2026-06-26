@@ -83,7 +83,12 @@ class OpenAIProvider:
         except Exception as exc:
             raise _typed_error(exc) from exc
 
-        choice = resp.choices[0]
+        # 空 choices(如内容过滤 finish_reason=content_filter 时)→ 显式终态错误,
+        # 而非裸 resp.choices[0] 的 IndexError 直冒 500。
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            raise TerminalError("provider returned no choices")
+        choice = choices[0]
         text = choice.message.content or ""
         tool_calls = len(getattr(choice.message, "tool_calls", None) or [])
         usage = getattr(resp, "usage", None)

@@ -194,6 +194,7 @@ def _cmd_serve(cfg, args) -> int:
         max_request_bytes=args.max_request_bytes,
         rate_limit_per_minute=args.rate_limit_per_minute,
         trust_proxy_headers=args.trust_proxy_headers,
+        allow_direct_models=cfg.allow_direct_models,
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
@@ -220,8 +221,14 @@ def _price_exists(cfg, target: Target) -> bool:
 
 def _pricing_problems(cfg) -> list[str]:
     problems: list[str] = []
-    specs = [(f"route {logical!r}", spec) for logical, targets in cfg.routes.items() for spec in targets]
-    specs.extend((f"alias {alias!r}", spec) for alias, spec in cfg.model_aliases.items())
+    specs = [
+        (f"route {logical!r}", spec)
+        for logical, targets in cfg.routes.items()
+        for spec in targets
+    ]
+    specs.extend(
+        (f"alias {alias!r}", spec) for alias, spec in cfg.model_aliases.items()
+    )
     for label, spec in specs:
         try:
             target = Target.parse(spec)

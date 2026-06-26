@@ -262,3 +262,18 @@ def test_tool_calling_anthropic_in_openai_out_anthropic_raw():
     assert block["name"] == "diagnose"
     assert block["input"] == {"root_cause": "OOM"}
     assert resp.raw["stop_reason"] == "tool_use"
+
+
+def test_invoke_empty_choices_raises_terminal():
+    """④ 空 choices(如内容过滤)→ 显式 TerminalError,而非裸 IndexError 直冒 500。"""
+
+    class _EmptyChoices:
+        def create(self, **kwargs):
+            usage = type("U", (), {"prompt_tokens": 1, "completion_tokens": 0})()
+            return type("R", (), {"choices": [], "usage": usage})()
+
+    client = type(
+        "C", (), {"chat": type("Chat", (), {"completions": _EmptyChoices()})()}
+    )()
+    with pytest.raises(TerminalError):
+        OpenAIProvider(client).invoke(T, REQ, timeout=5.0)

@@ -20,24 +20,38 @@ from agent_ctl.errors import (
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
 
 
+def _consumer_of(body: dict) -> str:
+    """调用方身份 = OpenAI 约定的 `user` 字段(供 per-consumer 预算/归因生效);
+    缺省回退固定名。注:HTTP 端鉴权仍是单 token,user 可伪造——这是把 per-consumer
+    预算从"完全无效"提到"诚实调用方可用",真正隔离需 per-token 身份(见 ADR 后置)。
+    """
+    user = body.get("user")
+    if isinstance(user, str) and user.strip():
+        return user.strip()[:128]
+    return "openai-compat-server"
+
+
 def to_normalized(body: dict) -> NormalizedRequest:
     """OpenAI /v1/chat/completions 请求体 → NormalizedRequest。
 
-    OpenAI 把 system 作为 messages 里 role=system 的一条;抽出首条 system 放
-    NormalizedRequest.system(AnthropicProvider 需独立 system,OpenAIProvider 会再塞回)。
+    OpenAI 允许多条 role=system;全部抽出按序合并到 NormalizedRequest.system
+    (AnthropicProvider 需独立 system 字段——漏合并会把第 2 条起当普通消息发给
+    Anthropic 触发 role 报错)。
     """
     messages = body.get("messages") or []
     if not isinstance(messages, list):
         raise ValueError("field 'messages' must be a list")
-    system = None
+    system_parts: list[str] = []
     rest = []
     for m in messages:
         if not isinstance(m, dict):
             raise ValueError("each message must be an object")
-        if m.get("role") == "system" and system is None:
-            system = m.get("content")
+        if m.get("role") == "system":
+            c = m.get("content")
+            system_parts.append(c if isinstance(c, str) else json.dumps(c))
         else:
             rest.append(m)
+    system = "\n\n".join(system_parts) if system_parts else None
     max_tokens = body["max_tokens"] if "max_tokens" in body else 1024
     try:
         if isinstance(max_tokens, bool):
@@ -71,7 +85,7 @@ def to_normalized(body: dict) -> NormalizedRequest:
         temperature=temperature,
         tools=body.get("tools"),
         tool_choice=body.get("tool_choice"),
-        metadata={"consumer": "openai-compat-server"},
+        metadata={"consumer": _consumer_of(body)},
     )
 
 
@@ -163,11 +177,13 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
 
     yield frame({"role": "assistant"})
     final_fr = "stop"
+    in_tok = out_tok = 0
     for chunk in itertools.chain([] if first is None else [first], gen):
         if chunk is None:
             continue
         if chunk.done:
             final_fr = chunk.finish_reason or "stop"
+            in_tok, out_tok = chunk.input_tokens, chunk.output_tokens
             if chunk.tool_calls:
                 # 工具调用合并为一帧下发(OpenAI 形;客户端可正常重组)
                 yield frame(
@@ -189,6 +205,22 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
         elif chunk.text:
             yield frame({"content": chunk.text})
     yield frame({}, finish_reason=final_fr)
+    # usage 帧(OpenAI stream_options.include_usage 约定:choices 为空 + usage)。
+    # 客户端据此在流式下拿到 token 计量,否则成本追踪在流式路径失效。
+    if in_tok or out_tok:
+        usage_payload = {
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": requested_model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": in_tok,
+                "completion_tokens": out_tok,
+                "total_tokens": in_tok + out_tok,
+            },
+        }
+        yield f"data: {_json.dumps(usage_payload, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -260,6 +292,7 @@ def build_server(
     max_request_bytes: int = 1_000_000,
     rate_limit_per_minute: int = 120,
     trust_proxy_headers: bool = False,
+    allow_direct_models: bool = True,
 ):
     """构造 OpenAI 兼容网关 FastAPI app。
 
@@ -272,6 +305,21 @@ def build_server(
     clock = now or (lambda: int(time.time()))
     app = FastAPI(title="agent-ctl OpenAI-compatible gateway")
     listed = list(models or [])
+    listed_set = set(listed)
+
+    def _direct_model_blocked(model: str):
+        """禁止用 "provider/model" 直连未登记目标(绕过路由白名单 = 绕过成本治理)。"""
+        if allow_direct_models or "/" not in model or model in listed_set:
+            return None
+        return JSONResponse(
+            status_code=400,
+            content=_error_body(
+                f"direct 'provider/model' target {model!r} not allowed; "
+                "use a configured route or alias",
+                "invalid_request_error",
+            ),
+        )
+
     # LRU 有界:仅按时间裁剪每个 bucket 不清理空闲 IP 的 key → 公网多 IP 会无界增长。
     # 用 OrderedDict 钉住被追踪客户端数,超界淘汰最久未见的 IP。
     request_buckets: OrderedDict[str, deque[float]] = OrderedDict()
@@ -353,6 +401,9 @@ def build_server(
                 status_code=400,
                 content=_error_body("field 'model' required", "invalid_request_error"),
             )
+        blocked = _direct_model_blocked(body["model"])
+        if blocked is not None:
+            return blocked
         try:
             req = to_normalized(body)
         except ValueError as exc:
@@ -401,6 +452,9 @@ def build_server(
                     "fields 'model' and 'input' required", "invalid_request_error"
                 ),
             )
+        blocked = _direct_model_blocked(body["model"])
+        if blocked is not None:
+            return blocked
         raw_input = body.get("input")
         if isinstance(raw_input, str):
             inputs = [raw_input]
@@ -424,7 +478,7 @@ def build_server(
                 gateway.embed,
                 body["model"],
                 inputs,
-                {"consumer": "openai-compat-server"},
+                {"consumer": _consumer_of(body)},
             )
         except GatewayError as exc:
             return _gateway_error_response(exc)
@@ -438,7 +492,9 @@ def _auth_error(
 ) -> dict | None:
     if request.url.path == "/healthz":
         return None
-    token = (metrics_token or api_token) if request.url.path == "/metrics" else api_token
+    token = (
+        (metrics_token or api_token) if request.url.path == "/metrics" else api_token
+    )
     if not token:
         return None
     expected = f"Bearer {token}"
