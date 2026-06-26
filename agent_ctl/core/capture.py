@@ -34,6 +34,81 @@ class Capturer:
         if ensure is not None:
             ensure(model_resolved)
 
+    # ── 共享:成本/计量/落库(chat 与 embed 复用,各自只组装 CallRecord 形状)──────
+
+    def _safe_cost(self, model_resolved, input_tokens, output_tokens) -> float | None:
+        if not model_resolved:
+            return None
+        try:
+            return self._cost.cost(model_resolved, input_tokens, output_tokens)
+        except Exception as exc:
+            log.warning("cost calculation failed (cost=None): %s", exc)
+            return None
+
+    def _meter(
+        self,
+        meta,
+        *,
+        model_resolved,
+        status,
+        latency_ms,
+        input_tokens,
+        output_tokens,
+        cost,
+        cache_hit,
+        error_type,
+    ) -> None:
+        # 实际成本计入预算累计(None/0 自动忽略)+ 指标上报(Prometheus,未装则 no-op)
+        self._budget.add(meta.get("consumer", "unknown"), cost)
+        metrics.record_call(
+            model_resolved=model_resolved,
+            status=status,
+            latency_ms=latency_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            cache_hit=cache_hit,
+            error_type=error_type,
+        )
+
+    def _base_record(
+        self,
+        meta,
+        *,
+        latency_ms,
+        model_requested,
+        model_resolved,
+        attempts,
+        cost,
+        status,
+        error_type,
+        error_message,
+    ) -> dict:
+        return {
+            "id": str(uuid.uuid4()),
+            "ts": time.time(),
+            "latency_ms": latency_ms,
+            "consumer": meta.get("consumer", "unknown"),
+            "call_site": meta.get("call_site"),
+            "trace_id": meta.get("trace_id"),
+            "model_requested": model_requested,
+            "model_resolved": model_resolved,
+            "attempts": attempts,
+            "cost_usd": cost,
+            "status": status,
+            "error_type": error_type,
+            "error_message_redacted": redact(error_message) if error_message else None,
+            "last_error": redact(attempts[-1].error) if attempts else None,
+        }
+
+    def _persist(self, **rec_kwargs) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.save(CallRecord(**rec_kwargs))
+        except Exception as exc:  # fail-open:捕获绝不打断主调用
+            log.warning("capture failed (fail-open): %s", exc)
+
     def record(
         self,
         request,
@@ -51,65 +126,51 @@ class Capturer:
     ) -> None:
         """chat(invoke / 流式)一跳的捕获:成本/预算/指标 + 脱敏落库。"""
         latency_ms = int((time.monotonic() - started) * 1000)
-        cost = None
+        in_tok = resp.input_tokens if resp else 0
+        out_tok = resp.output_tokens if resp else 0
+        cost: float | None
         if cache_hit:
             cost = 0.0  # 命中缓存=省下真实开销
-        elif resp is not None and model_resolved:
-            try:
-                cost = self._cost.cost(
-                    model_resolved, resp.input_tokens, resp.output_tokens
-                )
-            except Exception as exc:
-                log.warning("cost calculation failed (cost=None): %s", exc)
-        # 实际成本计入预算累计(None/0 自动忽略)
-        self._budget.add(meta.get("consumer", "unknown"), cost)
-        # 指标:无论是否落库都上报(Prometheus,未装则 no-op)
-        metrics.record_call(
+        else:
+            cost = self._safe_cost(model_resolved, in_tok, out_tok) if resp else None
+        self._meter(
+            meta,
             model_resolved=model_resolved,
             status=status,
             latency_ms=latency_ms,
-            input_tokens=resp.input_tokens if resp else 0,
-            output_tokens=resp.output_tokens if resp else 0,
-            cost_usd=cost,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cost=cost,
             cache_hit=cache_hit,
             error_type=error_type,
         )
-        if self._store is None:
-            return
-        try:
-            rec = CallRecord(
-                id=str(uuid.uuid4()),
-                ts=time.time(),
+        self._persist(
+            **self._base_record(
+                meta,
                 latency_ms=latency_ms,
-                consumer=meta.get("consumer", "unknown"),
-                call_site=meta.get("call_site"),
-                trace_id=meta.get("trace_id"),
                 model_requested=request.model,
-                params={
-                    "max_tokens": request.max_tokens,
-                    "temperature": request.temperature,
-                    "has_tools": bool(request.tools),
-                },
-                messages_redacted=redact_messages(request.messages),
-                prompt_version=meta.get("prompt_version"),
                 model_resolved=model_resolved,
                 attempts=attempts,
-                output_redacted=redact(resp.text) if resp else None,
-                finish_reason=resp.finish_reason if resp else None,
-                tool_calls=resp.tool_calls if resp else 0,
-                input_tokens=resp.input_tokens if resp else 0,
-                output_tokens=resp.output_tokens if resp else 0,
-                cost_usd=cost,
-                cache_hit=cache_hit,
-                cache_key=cache_key,
+                cost=cost,
                 status=status,
                 error_type=error_type,
-                error_message_redacted=redact(error_message) if error_message else None,
-                last_error=redact(attempts[-1].error) if attempts else None,
-            )
-            self._store.save(rec)
-        except Exception as exc:  # fail-open:捕获绝不打断主调用
-            log.warning("capture failed (fail-open): %s", exc)
+                error_message=error_message,
+            ),
+            params={
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "has_tools": bool(request.tools),
+            },
+            messages_redacted=redact_messages(request.messages),
+            prompt_version=meta.get("prompt_version"),
+            output_redacted=redact(resp.text) if resp else None,
+            finish_reason=resp.finish_reason if resp else None,
+            tool_calls=resp.tool_calls if resp else 0,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_hit=cache_hit,
+            cache_key=cache_key,
+        )
 
     def record_embed(
         self,
@@ -125,48 +186,34 @@ class Capturer:
     ) -> None:
         """embeddings 一跳的捕获(无 messages/output 文本,params 标 embed)。"""
         latency_ms = int((time.monotonic() - started) * 1000)
-        input_tokens = resp.input_tokens if resp else 0
-        cost = None
-        if resp is not None and model_resolved:
-            try:
-                cost = self._cost.cost(model_resolved, input_tokens, 0)
-            except Exception as exc:
-                log.warning("embed cost calculation failed (cost=None): %s", exc)
-        self._budget.add(meta.get("consumer", "unknown"), cost)
-        metrics.record_call(
+        in_tok = resp.input_tokens if resp else 0
+        cost = self._safe_cost(model_resolved, in_tok, 0) if resp else None
+        self._meter(
+            meta,
             model_resolved=model_resolved,
             status=status,
             latency_ms=latency_ms,
-            input_tokens=input_tokens,
+            input_tokens=in_tok,
             output_tokens=0,
-            cost_usd=cost,
+            cost=cost,
             cache_hit=False,
             error_type=error_type,
         )
-        if self._store is None:
-            return
-        try:
-            rec = CallRecord(
-                id=str(uuid.uuid4()),
-                ts=time.time(),
+        self._persist(
+            **self._base_record(
+                meta,
                 latency_ms=latency_ms,
-                consumer=meta.get("consumer", "unknown"),
-                call_site=meta.get("call_site"),
-                trace_id=meta.get("trace_id"),
                 model_requested=model,
-                params={"embed": True, "n_inputs": len(resp.vectors) if resp else 0},
                 model_resolved=model_resolved,
                 attempts=attempts,
-                input_tokens=input_tokens,
-                cost_usd=cost,
+                cost=cost,
                 status=status,
                 error_type=error_type,
-                error_message_redacted=redact(error_message) if error_message else None,
-                last_error=redact(attempts[-1].error) if attempts else None,
-            )
-            self._store.save(rec)
-        except Exception as exc:  # fail-open
-            log.warning("embed capture failed (fail-open): %s", exc)
+                error_message=error_message,
+            ),
+            params={"embed": True, "n_inputs": len(resp.vectors) if resp else 0},
+            input_tokens=in_tok,
+        )
 
     def log(
         self,
