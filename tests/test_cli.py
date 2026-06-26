@@ -1,9 +1,12 @@
 import json
 
+from fastapi.testclient import TestClient
+
 from agent_ctl.cli import main
 from agent_ctl.config import Config
-from agent_ctl.store.sqlite_store import SqliteCaptureStore
 from agent_ctl.models import CallRecord
+from agent_ctl.providers.fake import FakeProvider
+from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 
 def test_cost_command_reports(tmp_path, capsys, monkeypatch):
@@ -210,6 +213,25 @@ def test_doctor_warns_on_inconsistent_fallback_capabilities(
     assert "embed" in out  # 指出 embed 能力在目标间不一致
 
 
+def test_doctor_prod_requires_prices_for_routes_and_aliases(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"default": ["openai/gpt-4o"]},
+            model_aliases={"mini": "openai/gpt-4o-mini"},
+            prices={"gpt-4o": (1.0, 2.0)},
+            profile="prod",
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "gpt-4o-mini" in out
+
+
 def test_serve_rejects_non_local_without_token_before_provider_setup(
     tmp_path, capsys, monkeypatch
 ):
@@ -244,3 +266,29 @@ def test_serve_rejects_non_local_default_token_before_provider_setup(
     out = capsys.readouterr().out
     assert rc == 1
     assert "non-default" in out
+
+
+def test_serve_models_include_routes_and_aliases(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"default": ["fake/a"]},
+            model_aliases={"alias-a": "fake/a"},
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", lambda: ["fake"])
+    monkeypatch.setattr(
+        "agent_ctl.providers.catalog.build_providers",
+        lambda: {"fake": FakeProvider(["ok"])},
+    )
+    seen = {}
+
+    def fake_run(app, host, port):
+        seen["models"] = TestClient(app).get("/v1/models").json()
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    assert main(["serve"]) == 0
+    ids = {m["id"] for m in seen["models"]["data"]}
+    assert ids == {"default", "alias-a"}

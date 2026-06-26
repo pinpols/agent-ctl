@@ -8,11 +8,11 @@ WORKDIR /app
 
 RUN useradd --create-home --uid 10001 agentctl
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY agent_ctl ./agent_ctl
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install ".[server,anthropic,openai]"
+    && python -m pip install -c constraints.txt ".[server,anthropic,openai]"
 
 USER agentctl
 

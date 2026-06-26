@@ -109,6 +109,7 @@ curl http://127.0.0.1:8400/v1/chat/completions \
 - `circuit_failure_threshold` / `circuit_cooldown_s` — per-provider circuit breaker; the fallback chain skips an open provider until cooldown.
 - `request_deadline_s` — wall-clock budget per call; caps the worst case of retries × fallback × per-target timeout.
 - `budgets` (per-consumer USD) / `budget_global` — cost budget gate; an exhausted budget short-circuits before hitting a provider and returns HTTP 402.
+- `profile: prod` — missing prices for resolved targets fail closed before hitting a provider.
 - `capture_async` — capture writes run off the request path on a background thread (fail-open; the request never blocks on storage I/O).
 
 See [ADR-0001](docs/adr/0001-gateway-maturity-and-hardening.md) for the maturity/hardening decisions and the remaining (intentional) non-goals: distributed circuit/cache, Postgres capture store, persistent/shared budget windows, tiered cost modeling, and multi-tenant auth.
@@ -120,8 +121,11 @@ Captures are stored in SQLite at `db_path`. The store initializes schema metadat
 ## Production Notes
 
 - Keep `serve` bound to `127.0.0.1` unless an auth token and network controls are in place.
+- Use `--metrics-token` when Prometheus should scrape with a separate credential.
+- Use `--trust-proxy-headers` only behind a trusted reverse proxy that sets `X-Forwarded-For`.
 - Tool-call responses are not cached by default because they often depend on external state.
 - Retries use exponential backoff with jitter to avoid synchronized retry bursts.
+- Docker builds use `constraints.txt`; refresh it deliberately when upgrading dependencies.
 - Real-provider integration tests should be run manually with API keys and low `max_tokens`; unit tests avoid network calls.
 - See [operations.md](docs/operations.md) for Docker Compose, release, rollback, and runtime checks.
 - See [configuration.md](docs/configuration.md) for config schema generation and migration policy.

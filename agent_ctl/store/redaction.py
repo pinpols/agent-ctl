@@ -3,9 +3,22 @@ from __future__ import annotations
 import re
 
 _PATTERNS = [
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
     re.compile(r"sk-[A-Za-z0-9\-_]{8,}"),  # api keys
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),  # AWS access key id
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),  # GitHub tokens
     re.compile(r"(?i)bearer\s+[A-Za-z0-9\-_.]+"),  # bearer
     re.compile(r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+"),  # JWT
+    re.compile(
+        r"(?i)\b(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[^'\"\s,;]+"
+    ),
+    re.compile(
+        r"(?i)\b[A-Z0-9_]*(API_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*"
+        r"\s*[:=]\s*['\"]?[^'\"\s,;]+"
+    ),
     re.compile(r"://[^:/@\s]+:([^@/\s]+)@"),  # DSN password (group 1)
     re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"),  # email
     re.compile(r"\b1[3-9]\d{9}\b"),  # CN mobile

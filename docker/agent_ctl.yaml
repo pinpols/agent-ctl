@@ -3,9 +3,6 @@ routes:
 model_aliases:
   claude-sonnet-4-6: anthropic/claude-sonnet-4-6
   gpt-4o-mini: openai/gpt-4o-mini
-  deepseek-chat: deepseek/deepseek-chat
-  qwen-max: qwen/qwen-max
-  glm-4: glm/glm-4
 prices:
   claude-sonnet-4-6: [3.0, 15.0]
   gpt-4o-mini: [0.15, 0.6]

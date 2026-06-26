@@ -49,6 +49,13 @@ class StreamRunnerMixin:
                     target.name,
                 )
                 raise GatewayError(f"unregistered provider: {target.provider!r}")
+            try:
+                self._capturer.ensure_price(target.name)
+            except TerminalError as exc:
+                self._capture_stream_error(
+                    request, meta, started, attempts, "pricing", str(exc), target.name
+                )
+                raise
             if self._circuit_blocked(target, attempts):
                 continue
             provider = self._providers[target.provider]

@@ -8,7 +8,7 @@ from agent_ctl.config import RetryConfig
 from agent_ctl.providers.fake import FakeProvider
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
 from agent_ctl.models import NormalizedRequest
-from agent_ctl.errors import AllTargetsFailed, GatewayError
+from agent_ctl.errors import AllTargetsFailed, GatewayError, UnknownPriceError
 
 REQ = NormalizedRequest(
     model="default",
@@ -179,6 +179,24 @@ def test_cost_failure_still_saves_capture_record(tmp_path):
     rec = store.list_recent(1)[0]
     assert rec.status == "success"
     assert rec.cost_usd is None
+
+
+def test_strict_unknown_price_fails_before_provider_call(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    provider = FakeProvider(["ok"])
+    gw = Gateway(
+        router=Router({"default": ["fake/unpriced"]}),
+        providers={"fake": provider},
+        cost_meter=CostMeter({}, fail_unknown=True),
+        store=store,
+        retry=RETRY,
+    )
+    with pytest.raises(UnknownPriceError):
+        gw.invoke(REQ)
+    assert provider.calls == []
+    rec = store.list_recent(1)[0]
+    assert rec.status == "error"
+    assert rec.error_type == "pricing"
 
 
 def test_store_failure_is_fail_open(tmp_path):

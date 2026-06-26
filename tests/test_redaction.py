@@ -58,3 +58,32 @@ def test_redact_messages_recurses_into_content_blocks_and_tool_inputs():
     tool_block = out[0]["content"][1]
     assert "a@b.com" not in text_block["text"]
     assert "secretpw" not in tool_block["content"]["dsn"]
+
+
+def test_redact_common_cloud_and_repo_tokens():
+    text = (
+        "aws=AKIAABCDEFGHIJKLMNOP github=ghp_abcdefghijklmnopqrstuvwxyz "
+        "api_key=super-secret password:abc123"
+    )
+    out = redact(text)
+    assert "AKIAABCDEFGHIJKLMNOP" not in out
+    assert "ghp_abcdefghijklmnopqrstuvwxyz" not in out
+    assert "super-secret" not in out
+    assert "abc123" not in out
+
+
+def test_redact_private_key_block():
+    key = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+    out = redact(f"key={key}")
+    assert "BEGIN PRIVATE KEY" not in out
+    assert "abc" not in out
+
+
+def test_redact_env_style_secret_names():
+    text = (
+        "OPENAI_API_KEY=abc123xyz "
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    )
+    out = redact(text)
+    assert "abc123xyz" not in out
+    assert "wJalrXUtnFEMI" not in out

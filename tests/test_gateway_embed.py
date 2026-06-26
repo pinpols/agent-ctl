@@ -94,6 +94,24 @@ def test_embed_skips_provider_without_capability(tmp_path):
     assert rec.attempts[0].outcome == "no_embed"
 
 
+def test_embed_strict_pricing_skips_no_embed_before_price_check(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    no_embed = FakeProvider(["ok"])
+    emb = FakeEmbedProvider(["ok"])
+    gw = Gateway(
+        router=Router({"default": ["plain/unpriced-chat", "emb/m"]}),
+        providers={"plain": no_embed, "emb": emb},
+        cost_meter=CostMeter({"m": (5.0, 25.0)}, fail_unknown=True),
+        store=store,
+        retry=RETRY,
+    )
+    resp = gw.embed("default", ["x"], {"consumer": "t"})
+    assert len(resp.vectors) == 1
+    rec = store.list_recent(1)[0]
+    assert rec.status == "fallback_success"
+    assert rec.attempts[0].outcome == "no_embed"
+
+
 def test_embed_open_circuit_skips_provider(tmp_path):
     store = SqliteCaptureStore(str(tmp_path / "c.db"))
     pa = FakeEmbedProvider(["retriable", "retriable", "retriable"])

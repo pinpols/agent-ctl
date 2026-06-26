@@ -40,3 +40,7 @@ agent-ctl --config agent_ctl.yaml doctor
 - `budgets`, `budget_global`: non-negative in-process USD budget caps.
 - `circuit_failure_threshold`, `circuit_cooldown_s`: provider circuit breaker controls; `0` disables.
 - `retry`: bounded retry behavior per target.
+
+In `profile: prod`, each configured route and alias must have either a
+`provider/model` price key or a bare model price key. Unknown configured prices
+fail closed before a provider call is attempted.

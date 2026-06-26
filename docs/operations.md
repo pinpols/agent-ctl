@@ -16,6 +16,7 @@ Required checks:
 - At least one provider API key is present.
 - Non-local `serve` uses `--api-token`.
 - `profile: prod` has a non-empty `prices` table.
+- Every configured prod route and alias has a matching price entry.
 - Route fallback chains have expected provider capabilities.
 
 ## Run With Docker Compose
@@ -32,7 +33,7 @@ The compose template intentionally fails fast when `AGENT_CTL_API_TOKEN` is unse
 ## Observability
 
 - Health: `GET /healthz`
-- Metrics: `GET /metrics`
+- Metrics: `GET /metrics` (uses the server token unless `--metrics-token` is set)
 - Capture inspection: `agent-ctl --config agent_ctl.yaml captures --limit 20`
 - Cost summary: `agent-ctl --config agent_ctl.yaml cost --group-by model`
 - Export traces: `agent-ctl --config agent_ctl.yaml export --out traces.jsonl`
@@ -44,7 +45,8 @@ The compose template intentionally fails fast when `AGENT_CTL_API_TOKEN` is unse
 3. Run `pytest`, `ruff`, and `mypy`.
 4. Run `agent-ctl --config agent-ctl.example.yaml doctor`.
 5. Build image: `docker build -t agent-ctl:<version> .`.
-6. Tag source: `git tag v<version>`.
+6. Refresh `constraints.txt` if dependency versions changed.
+7. Tag source: `git tag v<version>`.
 
 ## Rollback
 

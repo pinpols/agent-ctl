@@ -248,6 +248,26 @@ class Gateway(StreamRunnerMixin, EmbeddingRunnerMixin):
                 raise GatewayError(
                     f"unregistered provider: {target.provider!r} (model={request.model!r})"
                 )
+            try:
+                self._capturer.ensure_price(target.name)
+            except TerminalError as exc:
+                self._capturer.record(
+                    request,
+                    meta,
+                    started,
+                    model_resolved=target.name,
+                    attempts=all_attempts,
+                    resp=None,
+                    status="error",
+                    cache_hit=False,
+                    cache_key=cache_key,
+                    error_type="pricing",
+                    error_message=str(exc),
+                )
+                self._capturer.log(
+                    request, meta, "error", target.name, "pricing", False, started
+                )
+                raise
             if self._circuit_blocked(target, all_attempts):
                 continue
             provider = self._providers[target.provider]

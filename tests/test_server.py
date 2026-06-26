@@ -202,6 +202,26 @@ def test_chat_completions_bad_max_tokens_400():
     assert "max_tokens" in r.json()["error"]["message"]
 
 
+def test_chat_completions_rejects_non_positive_max_tokens():
+    c = _client(FakeGateway(resp=NormalizedResponse(text="")))
+    for value in (0, -1):
+        r = c.post(
+            "/v1/chat/completions",
+            json={"model": "openai/gpt-4o", "messages": [], "max_tokens": value},
+        )
+        assert r.status_code == 400
+
+
+def test_chat_completions_rejects_bad_temperature():
+    c = _client(FakeGateway(resp=NormalizedResponse(text="")))
+    r = c.post(
+        "/v1/chat/completions",
+        json={"model": "openai/gpt-4o", "messages": [], "temperature": 3},
+    )
+    assert r.status_code == 400
+    assert "temperature" in r.json()["error"]["message"]
+
+
 def test_chat_completions_streaming_emits_multiple_sse_chunks():
     """真流式:多段文本增量 → 多个 content 帧逐块下发。"""
     gw = FakeGateway(
@@ -394,10 +414,52 @@ def test_server_requires_bearer_token_when_configured():
             api_token="secret",
         )
     )
-    r = c.get("/healthz")
+    r = c.get("/v1/models")
     assert r.status_code == 401
-    ok = c.get("/healthz", headers={"Authorization": "Bearer secret"})
+    assert c.get("/healthz").status_code == 200
+    ok = c.get("/v1/models", headers={"Authorization": "Bearer secret"})
     assert ok.status_code == 200
+
+
+def test_metrics_can_use_separate_token():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="api-secret",
+            metrics_token="metrics-secret",
+            rate_limit_per_minute=0,
+        )
+    )
+    assert c.get("/metrics", headers={"Authorization": "Bearer api-secret"}).status_code == 401
+    assert c.get("/metrics", headers={"Authorization": "Bearer metrics-secret"}).status_code == 200
+
+
+def test_metrics_auth_failures_consume_rate_limit():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="api-secret",
+            metrics_token="metrics-secret",
+            rate_limit_per_minute=1,
+        )
+    )
+    assert c.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/metrics", headers={"Authorization": "Bearer wrong2"}).status_code == 429
+
+
+def test_metrics_falls_back_to_api_token_when_no_metrics_token():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="api-secret",
+            rate_limit_per_minute=0,
+        )
+    )
+    assert c.get("/metrics").status_code == 401
+    assert c.get("/metrics", headers={"Authorization": "Bearer api-secret"}).status_code == 200
 
 
 def test_server_rejects_large_request():
@@ -414,6 +476,21 @@ def test_server_rejects_large_request():
         json={"model": "openai/gpt-4o", "messages": []},
     )
     assert r.status_code == 413
+
+
+def test_server_rejects_invalid_content_length():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+        )
+    )
+    r = c.post(
+        "/v1/chat/completions",
+        content=b"{}",
+        headers={"Content-Type": "application/json", "Content-Length": "bad"},
+    )
+    assert r.status_code == 400
 
 
 def test_server_rejects_large_request_even_with_low_content_length_header():
@@ -458,5 +535,45 @@ def test_server_rate_limits_by_client():
             rate_limit_per_minute=1,
         )
     )
+    assert c.get("/v1/models").status_code == 200
+    assert c.get("/v1/models").status_code == 429
+
+
+def test_auth_failures_consume_rate_limit():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="secret",
+            rate_limit_per_minute=1,
+        )
+    )
+    assert c.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/v1/models", headers={"Authorization": "Bearer wrong2"}).status_code == 429
+
+
+def test_healthz_skips_auth_and_rate_limit():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="secret",
+            rate_limit_per_minute=1,
+        )
+    )
     assert c.get("/healthz").status_code == 200
-    assert c.get("/healthz").status_code == 429
+    assert c.get("/healthz").status_code == 200
+
+
+def test_rate_limit_can_trust_forwarded_for():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            rate_limit_per_minute=1,
+            trust_proxy_headers=True,
+        )
+    )
+    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
+    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 200
+    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 429

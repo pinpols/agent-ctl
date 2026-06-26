@@ -67,6 +67,21 @@ class EmbeddingRunnerMixin:
                     )
                 )
                 continue
+            try:
+                self._capturer.ensure_price(target.name)
+            except TerminalError as exc:
+                self._capturer.record_embed(
+                    model,
+                    meta,
+                    started,
+                    target.name,
+                    attempts,
+                    None,
+                    "error",
+                    "pricing",
+                    str(exc),
+                )
+                raise
             if self._circuit_blocked(target, attempts):
                 continue
             embed_timeout = self._timeout_within(deadline)

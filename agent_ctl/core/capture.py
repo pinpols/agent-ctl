@@ -27,6 +27,13 @@ class Capturer:
         self._store = store
         self._budget = budget
 
+    def ensure_price(self, model_resolved: str | None) -> None:
+        if not model_resolved:
+            return
+        ensure = getattr(self._cost, "ensure_price", None)
+        if ensure is not None:
+            ensure(model_resolved)
+
     def record(
         self,
         request,

@@ -38,17 +38,37 @@ def to_normalized(body: dict) -> NormalizedRequest:
             system = m.get("content")
         else:
             rest.append(m)
-    max_tokens = body.get("max_tokens") or 1024
+    max_tokens = body["max_tokens"] if "max_tokens" in body else 1024
     try:
+        if isinstance(max_tokens, bool):
+            raise ValueError
         max_tokens = int(max_tokens)
     except (TypeError, ValueError) as exc:
         raise ValueError("field 'max_tokens' must be an integer") from exc
+    if max_tokens <= 0:
+        raise ValueError("field 'max_tokens' must be a positive integer")
+    temperature = body.get("temperature")
+    if temperature is not None:
+        try:
+            if isinstance(temperature, bool):
+                raise ValueError
+            temperature = float(temperature)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("field 'temperature' must be a number") from exc
+        if not 0 <= temperature <= 2:
+            raise ValueError("field 'temperature' must be between 0 and 2")
+    if body.get("tools") is not None and not isinstance(body["tools"], list):
+        raise ValueError("field 'tools' must be a list")
+    if body.get("tool_choice") is not None and not isinstance(
+        body["tool_choice"], (dict, str)
+    ):
+        raise ValueError("field 'tool_choice' must be an object or string")
     return NormalizedRequest(
         model=body["model"],
         messages=rest,
         system=system,
         max_tokens=max_tokens,
-        temperature=body.get("temperature"),
+        temperature=temperature,
         tools=body.get("tools"),
         tool_choice=body.get("tool_choice"),
         metadata={"consumer": "openai-compat-server"},
@@ -202,11 +222,13 @@ def _invalid_json_response() -> JSONResponse:
 
 
 async def _read_json_body(request: Request, max_request_bytes: int):
-    raw = await request.body()
-    if len(raw) > max_request_bytes:
-        return None, _request_too_large_response()
+    chunks = bytearray()
+    async for chunk in request.stream():
+        if len(chunks) + len(chunk) > max_request_bytes:
+            return None, _request_too_large_response()
+        chunks.extend(chunk)
     try:
-        return json.loads(raw), None
+        return json.loads(chunks), None
     except (JSONDecodeError, UnicodeDecodeError):
         return None, _invalid_json_response()
 
@@ -234,8 +256,10 @@ def build_server(
     now=None,
     *,
     api_token: str | None = None,
+    metrics_token: str | None = None,
     max_request_bytes: int = 1_000_000,
     rate_limit_per_minute: int = 120,
+    trust_proxy_headers: bool = False,
 ):
     """构造 OpenAI 兼容网关 FastAPI app。
 
@@ -255,17 +279,20 @@ def build_server(
 
     @app.middleware("http")
     async def safety_middleware(request: Request, call_next):
-        auth_error = _auth_error(request, api_token)
-        if auth_error is not None:
-            return JSONResponse(status_code=401, content=auth_error)
-        length = int(request.headers.get("content-length") or 0)
+        try:
+            length = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content=_error_body("invalid Content-Length", "invalid_request_error"),
+            )
         if length > max_request_bytes:
             return JSONResponse(
                 status_code=413,
                 content=_error_body("request too large", "request_too_large"),
             )
-        if rate_limit_per_minute > 0:
-            client = request.client.host if request.client else "unknown"
+        if rate_limit_per_minute > 0 and request.url.path != "/healthz":
+            client = _rate_limit_key(request, trust_proxy_headers)
             now_ts = time.monotonic()
             bucket = request_buckets.get(client)
             if bucket is None:
@@ -282,6 +309,9 @@ def build_server(
             bucket.append(now_ts)
             while len(request_buckets) > max_clients:
                 request_buckets.popitem(last=False)  # 淘汰最久未见的客户端
+        auth_error = _auth_error(request, api_token, metrics_token)
+        if auth_error is not None:
+            return JSONResponse(status_code=401, content=auth_error)
         return await call_next(request)
 
     @app.get("/healthz")
@@ -318,7 +348,7 @@ def build_server(
                     "request body must be an object", "invalid_request_error"
                 ),
             )
-        if not body.get("model"):
+        if not isinstance(body.get("model"), str) or not body["model"].strip():
             return JSONResponse(
                 status_code=400,
                 content=_error_body("field 'model' required", "invalid_request_error"),
@@ -360,7 +390,11 @@ def build_server(
         body, error_response = await _read_json_body(request, max_request_bytes)
         if error_response is not None:
             return error_response
-        if not isinstance(body, dict) or not body.get("model"):
+        if (
+            not isinstance(body, dict)
+            or not isinstance(body.get("model"), str)
+            or not body["model"].strip()
+        ):
             return JSONResponse(
                 status_code=400,
                 content=_error_body(
@@ -399,11 +433,24 @@ def build_server(
     return app
 
 
-def _auth_error(request, api_token: str | None) -> dict | None:
-    if not api_token:
+def _auth_error(
+    request, api_token: str | None, metrics_token: str | None = None
+) -> dict | None:
+    if request.url.path == "/healthz":
         return None
-    expected = f"Bearer {api_token}"
+    token = (metrics_token or api_token) if request.url.path == "/metrics" else api_token
+    if not token:
+        return None
+    expected = f"Bearer {token}"
     actual = request.headers.get("authorization") or ""
     if not hmac.compare_digest(actual.encode(), expected.encode()):
         return _error_body("missing or invalid bearer token", "unauthorized")
     return None
+
+
+def _rate_limit_key(request: Request, trust_proxy_headers: bool) -> str:
+    if trust_proxy_headers:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            return f"xff:{forwarded_for.split(',', 1)[0].strip()}"
+    return request.client.host if request.client else "unknown"

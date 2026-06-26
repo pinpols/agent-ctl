@@ -63,7 +63,7 @@ class GatewayClient:
         gateway = Gateway(
             router=Router(config.routes, config.model_aliases),
             providers=providers,
-            cost_meter=CostMeter(config.prices),
+            cost_meter=CostMeter(config.prices, fail_unknown=config.profile == "prod"),
             store=build_store(config),
             cache=MemoryCache(config.cache_max_entries)
             if config.cache_enabled

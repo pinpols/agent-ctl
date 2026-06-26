@@ -129,6 +129,8 @@ def _cmd_doctor(cfg, args) -> int:
                 )
     if cfg.profile == "prod" and not cfg.prices:
         problems.append("prod profile 下 prices 为空:成本将全为 None")
+    if cfg.profile == "prod":
+        problems.extend(_pricing_problems(cfg))
     if problems:
         for p in problems:
             print("FAIL:", p)
@@ -173,7 +175,7 @@ def _cmd_serve(cfg, args) -> int:
     gateway = Gateway(
         router=Router(cfg.routes, cfg.model_aliases),
         providers=providers,
-        cost_meter=CostMeter(cfg.prices),
+        cost_meter=CostMeter(cfg.prices, fail_unknown=cfg.profile == "prod"),
         store=build_store(cfg),
         cache=MemoryCache(cfg.cache_max_entries) if cfg.cache_enabled else None,
         retry=cfg.retry,
@@ -186,10 +188,12 @@ def _cmd_serve(cfg, args) -> int:
     )
     app = build_server(
         gateway,
-        models=sorted(cfg.model_aliases) or avail,
+        models=sorted({*cfg.routes, *cfg.model_aliases}) or avail,
         api_token=args.api_token,
+        metrics_token=args.metrics_token,
         max_request_bytes=args.max_request_bytes,
         rate_limit_per_minute=args.rate_limit_per_minute,
+        trust_proxy_headers=args.trust_proxy_headers,
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
@@ -208,6 +212,27 @@ def _parse_since(value: str | None) -> float | None:
     if value.endswith("d"):
         return time.time() - float(value[:-1]) * 86400
     return float(value)
+
+
+def _price_exists(cfg, target: Target) -> bool:
+    return target.name in cfg.prices or target.model in cfg.prices
+
+
+def _pricing_problems(cfg) -> list[str]:
+    problems: list[str] = []
+    specs = [(f"route {logical!r}", spec) for logical, targets in cfg.routes.items() for spec in targets]
+    specs.extend((f"alias {alias!r}", spec) for alias, spec in cfg.model_aliases.items())
+    for label, spec in specs:
+        try:
+            target = Target.parse(spec)
+        except ValueError:
+            continue
+        if not _price_exists(cfg, target):
+            problems.append(
+                f"{label} → {spec!r}: prod profile 缺少价格配置 "
+                f"(需要 prices.{target.name!r} 或 prices.{target.model!r})"
+            )
+    return problems
 
 
 _COMMANDS = {
@@ -252,8 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8400)
     p_serve.add_argument("--api-token", default=None)
+    p_serve.add_argument("--metrics-token", default=None)
     p_serve.add_argument("--max-request-bytes", type=int, default=1_000_000)
     p_serve.add_argument("--rate-limit-per-minute", type=int, default=120)
+    p_serve.add_argument("--trust-proxy-headers", action="store_true")
     args = parser.parse_args(argv)
     cfg = (
         None

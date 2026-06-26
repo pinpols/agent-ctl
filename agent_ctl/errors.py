@@ -22,3 +22,7 @@ class AllTargetsFailed(GatewayError):
 
 class BudgetExceeded(GatewayError):
     """成本预算闸:consumer/全局已达上限,调用前短路(不产生真实开销)。"""
+
+
+class UnknownPriceError(TerminalError):
+    """生产价格策略为 fail-closed 时,目标模型缺少价格配置。"""

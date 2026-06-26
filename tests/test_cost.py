@@ -1,4 +1,5 @@
 from agent_ctl.core.cost import CostMeter
+from agent_ctl.errors import UnknownPriceError
 
 
 def test_cost_known_model():
@@ -20,3 +21,13 @@ def test_cost_prefers_provider_qualified_price():
 def test_cost_falls_back_to_bare_model_price():
     m = CostMeter({"gpt": (1.0, 2.0)})
     assert m.cost("openai/gpt", 1000, 500) == 0.002
+
+
+def test_cost_strict_unknown_model_raises():
+    m = CostMeter({}, fail_unknown=True)
+    try:
+        m.cost("mystery", 1000, 500)
+    except UnknownPriceError as exc:
+        assert "mystery" in str(exc)
+    else:
+        raise AssertionError("expected UnknownPriceError")
