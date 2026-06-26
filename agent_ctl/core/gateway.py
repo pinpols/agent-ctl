@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections.abc import Iterator
 
 from agent_ctl.config import RetryConfig
 from agent_ctl.core.budget import BudgetGuard
@@ -11,9 +12,9 @@ from agent_ctl.core.cache import make_key
 from agent_ctl.core.capture import Capturer
 from agent_ctl.core.circuit import CircuitBreaker
 from agent_ctl.core.cost import CostMeter
-from agent_ctl.core.embedding_runner import EmbeddingRunnerMixin
+from agent_ctl.core.embedding_runner import EmbeddingRunner
 from agent_ctl.core.router import Router
-from agent_ctl.core.stream_runner import StreamRunnerMixin
+from agent_ctl.core.stream_runner import StreamRunner
 from agent_ctl.errors import (
     AllTargetsFailed,
     BudgetExceeded,
@@ -24,8 +25,10 @@ from agent_ctl.errors import (
 )
 from agent_ctl.models import (
     Attempt,
+    EmbeddingResponse,
     NormalizedRequest,
     NormalizedResponse,
+    StreamChunk,
     Target,
 )
 from agent_ctl.providers.base import Provider
@@ -33,7 +36,11 @@ from agent_ctl.providers.base import Provider
 log = logging.getLogger("agent_ctl.gateway")
 
 
-class Gateway(StreamRunnerMixin, EmbeddingRunnerMixin):
+class Gateway:
+    """治理编排门面:持有 router/providers/circuit/budget/capturer + 缓存,
+    把流式/embeddings 委派给协作者(StreamRunner/EmbeddingRunner),自身满足 RunnerHost。
+    """
+
     def __init__(
         self,
         router: Router,
@@ -61,6 +68,9 @@ class Gateway(StreamRunnerMixin, EmbeddingRunnerMixin):
         self._budget = budget or BudgetGuard()  # 默认空=不限
         # Capturer 与 Gateway 必须共享同一 BudgetGuard 实例(check 在网关、add 在捕获)
         self._capturer = Capturer(cost_meter, store, self._budget)
+        # 流式/embeddings 协作者:接收 self(满足 RunnerHost),非 mixin 继承
+        self._stream = StreamRunner(self)
+        self._embed = EmbeddingRunner(self)
 
         # 守护 route↔provider 一致性:在构建期快速失败,避免 invoke 时裸 KeyError。
         # 只校验 routes(必经);aliases 是可选项(共享配置里可能含本消费者没 key 的 provider),
@@ -337,6 +347,14 @@ class Gateway(StreamRunnerMixin, EmbeddingRunnerMixin):
         )
         self._capturer.log(request, meta, "error", None, "all_failed", False, started)
         raise AllTargetsFailed(f"all targets failed for model {request.model!r}")
+
+    def invoke_stream(self, request: NormalizedRequest) -> Iterator[StreamChunk]:
+        return self._stream.invoke_stream(request)
+
+    def embed(
+        self, model: str, inputs: list[str], metadata: dict | None = None
+    ) -> EmbeddingResponse:
+        return self._embed.embed(model, inputs, metadata)
 
     def _attempt(self, target: Target, outcome: str, t0: float, error: str | None):
         latency = int((time.monotonic() - t0) * 1000) if t0 else 0

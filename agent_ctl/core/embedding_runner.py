@@ -1,8 +1,9 @@
-# mypy: disable-error-code="attr-defined"
+# agent_ctl/core/embedding_runner.py
 from __future__ import annotations
 
 import time
 
+from agent_ctl.core._host import RunnerHost
 from agent_ctl.errors import (
     AllTargetsFailed,
     BudgetExceeded,
@@ -14,7 +15,12 @@ from agent_ctl.models import Attempt, EmbeddingResponse
 from agent_ctl.providers.base import EmbeddingProvider
 
 
-class EmbeddingRunnerMixin:
+class EmbeddingRunner:
+    """Embeddings 执行(协作者):用 host 的治理面,不再继承 Gateway 私有成员。"""
+
+    def __init__(self, host: RunnerHost) -> None:
+        self._host = host
+
     def embed(
         self, model: str, inputs: list[str], metadata: dict | None = None
     ) -> EmbeddingResponse:
@@ -23,29 +29,30 @@ class EmbeddingRunnerMixin:
         不支持 embed 的目标(如 Anthropic)在回退链里被跳过(留痕 no_embed)。
         embeddings 单次调用不做 per-target 重试(provider SDK 自带重试)。
         """
+        h = self._host
         started = time.monotonic()
         meta = metadata or {}
         try:
-            self._budget.check(meta.get("consumer", "unknown"))
+            h._budget.check(meta.get("consumer", "unknown"))
         except BudgetExceeded as exc:
-            self._capturer.record_embed(
+            h._capturer.record_embed(
                 model, meta, started, None, [], None, "error", "budget", str(exc)
             )
             raise
         try:
-            targets = self._router.resolve(model)
+            targets = h._router.resolve(model)
         except Exception as exc:
-            self._capturer.record_embed(
+            h._capturer.record_embed(
                 model, meta, started, None, [], None, "error", "routing", str(exc)
             )
             raise GatewayError(str(exc)) from exc
         attempts: list[Attempt] = []
-        deadline = self._deadline_for(started)
+        deadline = h._deadline_for(started)
         for idx, target in enumerate(targets):
-            if self._deadline_exceeded(target, deadline, attempts):
+            if h._deadline_exceeded(target, deadline, attempts):
                 break
-            if target.provider not in self._providers:
-                self._capturer.record_embed(
+            if target.provider not in h._providers:
+                h._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -59,19 +66,19 @@ class EmbeddingRunnerMixin:
                 raise GatewayError(
                     f"unregistered provider: {target.provider!r} (model={model!r})"
                 )
-            provider = self._providers[target.provider]
+            provider = h._providers[target.provider]
             if not isinstance(provider, EmbeddingProvider):
                 attempts.append(
-                    self._attempt(
+                    h._attempt(
                         target, "no_embed", 0, "provider has no embeddings capability"
                     )
                 )
                 continue
             embed_fn = provider.embed
             try:
-                self._capturer.ensure_price(target.name)
+                h._capturer.ensure_price(target.name)
             except TerminalError as exc:
-                self._capturer.record_embed(
+                h._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -83,18 +90,18 @@ class EmbeddingRunnerMixin:
                     str(exc),
                 )
                 raise
-            if self._circuit_blocked(target, attempts):
+            if h._circuit_blocked(target, attempts):
                 continue
-            embed_timeout = self._timeout_within(deadline)
+            embed_timeout = h._timeout_within(deadline)
             if embed_timeout is None:
                 attempts.append(
-                    self._attempt(target, "deadline", 0, "request deadline exceeded")
+                    h._attempt(target, "deadline", 0, "request deadline exceeded")
                 )
                 break
             started_t = time.monotonic()
             try:
                 resp = embed_fn(target, inputs, embed_timeout)
-                self._circuit.record_success(target.provider)
+                h._circuit.record_success(target.provider)
                 attempts.append(
                     Attempt(
                         provider=target.provider,
@@ -104,7 +111,7 @@ class EmbeddingRunnerMixin:
                     )
                 )
                 status = "success" if idx == 0 else "fallback_success"
-                self._capturer.record_embed(
+                h._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -117,7 +124,7 @@ class EmbeddingRunnerMixin:
                 )
                 return resp
             except TerminalError as exc:
-                self._circuit.record_failure(target.provider)
+                h._circuit.record_failure(target.provider)
                 attempts.append(
                     Attempt(
                         provider=target.provider,
@@ -127,7 +134,7 @@ class EmbeddingRunnerMixin:
                         error=str(exc),
                     )
                 )
-                self._capturer.record_embed(
+                h._capturer.record_embed(
                     model,
                     meta,
                     started,
@@ -140,7 +147,7 @@ class EmbeddingRunnerMixin:
                 )
                 raise
             except (RetriableError, TimeoutError) as exc:
-                self._circuit.record_failure(target.provider)
+                h._circuit.record_failure(target.provider)
                 attempts.append(
                     Attempt(
                         provider=target.provider,
@@ -151,7 +158,7 @@ class EmbeddingRunnerMixin:
                     )
                 )
                 continue
-        self._capturer.record_embed(
+        h._capturer.record_embed(
             model,
             meta,
             started,

@@ -550,7 +550,9 @@ def _rate_limit_key(
     trust_proxy_headers: bool,
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
 ) -> str:
-    if trust_proxy_headers and _client_is_trusted_proxy(request, trusted_proxy_networks):
+    if trust_proxy_headers and _client_is_trusted_proxy(
+        request, trusted_proxy_networks
+    ):
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
             return f"xff:{forwarded_for.split(',', 1)[0].strip()}"

@@ -1,10 +1,11 @@
-# mypy: disable-error-code="attr-defined"
+# agent_ctl/core/stream_runner.py
 from __future__ import annotations
 
 import itertools
 import time
 from collections.abc import Generator, Iterator
 
+from agent_ctl.core._host import CallCtx, RunnerHost
 from agent_ctl.errors import (
     AllTargetsFailed,
     BudgetExceeded,
@@ -13,123 +14,115 @@ from agent_ctl.errors import (
     RetriableError,
     TerminalError,
 )
-from agent_ctl.models import Attempt, NormalizedRequest, NormalizedResponse, StreamChunk
+from agent_ctl.models import NormalizedRequest, NormalizedResponse, StreamChunk
 from agent_ctl.providers.base import StreamingProvider
 
 
-class StreamRunnerMixin:
+class StreamRunner:
+    """真·流式执行(协作者):用 host 的治理面,不再继承 Gateway 私有成员。
+
+    CallCtx 承载 (request, meta, started, deadline, attempts),把各辅助方法的参数从
+    8–9 个压到 ctx + 少数变量。
+    """
+
+    def __init__(self, host: RunnerHost) -> None:
+        self._host = host
+
     def invoke_stream(self, request: NormalizedRequest) -> Iterator[StreamChunk]:
-        """真·流式:逐块产出文本增量,末块 done=True 带最终计量。"""
+        """逐块产出文本增量,末块 done=True 带最终计量。"""
+        h = self._host
         started = time.monotonic()
         meta = request.metadata or {}
-        consumer = meta.get("consumer", "unknown")
+        ctx = CallCtx(request=request, meta=meta, started=started, deadline=None)
         try:
-            self._budget.check(consumer)
+            h._budget.check(meta.get("consumer", "unknown"))
         except BudgetExceeded as exc:
-            self._capture_stream_error(request, meta, started, [], "budget", str(exc))
+            self._error(ctx, "budget", str(exc))
             raise
         try:
-            targets = self._router.resolve(request.model)
+            targets = h._router.resolve(request.model)
         except Exception as exc:
-            self._capture_stream_error(request, meta, started, [], "routing", str(exc))
+            self._error(ctx, "routing", str(exc))
             raise GatewayError(str(exc)) from exc
 
-        deadline = self._deadline_for(started)
-        attempts: list[Attempt] = []
+        ctx.deadline = h._deadline_for(started)
         for idx, target in enumerate(targets):
-            if self._deadline_exceeded(target, deadline, attempts):
+            if h._deadline_exceeded(target, ctx.deadline, ctx.attempts):
                 break
-            if target.provider not in self._providers:
-                self._capture_stream_error(
-                    request,
-                    meta,
-                    started,
-                    attempts,
+            if target.provider not in h._providers:
+                self._error(
+                    ctx,
                     "provider",
                     f"unregistered provider: {target.provider!r}",
                     target.name,
                 )
                 raise GatewayError(f"unregistered provider: {target.provider!r}")
             try:
-                self._capturer.ensure_price(target.name)
+                h._capturer.ensure_price(target.name)
             except TerminalError as exc:
-                self._capture_stream_error(
-                    request, meta, started, attempts, "pricing", str(exc), target.name
-                )
+                self._error(ctx, "pricing", str(exc), target.name)
                 raise
-            if self._circuit_blocked(target, attempts):
+            if h._circuit_blocked(target, ctx.attempts):
                 continue
-            provider = self._providers[target.provider]
+            provider = h._providers[target.provider]
 
             if not isinstance(provider, StreamingProvider):
                 # 无原生流式能力 → 缓冲式降级(跑非流式再切块)
-                yielded = yield from self._invoke_buffered_stream_target(
-                    provider, target, request, attempts, deadline, started, meta, idx
+                yielded = yield from self._buffered_target(provider, target, ctx, idx)
+            else:
+                yielded = yield from self._native_target(
+                    provider.stream, target, ctx, idx
                 )
-                if yielded:
-                    return
-                continue
-
-            yielded = yield from self._invoke_native_stream_target(
-                provider.stream, target, request, attempts, deadline, started, meta, idx
-            )
             if yielded:
                 return
 
-        self._capture_stream_error(
-            request,
-            meta,
-            started,
-            attempts,
-            "all_failed",
-            attempts[-1].error if attempts else None,
-        )
+        self._error(ctx, "all_failed", ctx.attempts[-1].error if ctx.attempts else None)
         raise AllTargetsFailed(f"all stream targets failed for model {request.model!r}")
 
-    def _invoke_buffered_stream_target(
-        self, provider, target, request, attempts, deadline, started, meta, idx
+    def _buffered_target(
+        self, provider, target, ctx: CallCtx, idx: int
     ) -> Generator[StreamChunk, None, bool]:
+        h = self._host
         try:
-            resp = self._invoke_target(provider, target, request, attempts, deadline)
-        except TerminalError as exc:
-            self._circuit.record_failure(target.provider)
-            self._capture_stream_error(
-                request, meta, started, attempts, "terminal", str(exc), target.name
+            resp = h._invoke_target(
+                provider, target, ctx.request, ctx.attempts, ctx.deadline
             )
+        except TerminalError as exc:
+            h._circuit.record_failure(target.provider)
+            self._error(ctx, "terminal", str(exc), target.name)
             raise
         except DeadlineExceeded:
             return False
         except (RetriableError, TimeoutError):
-            self._circuit.record_failure(target.provider)
+            h._circuit.record_failure(target.provider)
             return False
-        self._circuit.record_success(target.provider)
-        self._capture_stream_ok(request, meta, started, target, attempts, resp, idx)
+        h._circuit.record_success(target.provider)
+        self._ok(ctx, target, resp, idx)
         yield from self._chunks_of(resp)
         return True
 
-    def _invoke_native_stream_target(
-        self, stream_fn, target, request, attempts, deadline, started, meta, idx
+    def _native_target(
+        self, stream_fn, target, ctx: CallCtx, idx: int
     ) -> Generator[StreamChunk, None, bool]:
-        timeout = self._timeout_within(deadline)
+        h = self._host
+        timeout = h._timeout_within(ctx.deadline)
         if timeout is None:
-            attempts.append(self._attempt(target, "deadline", 0, "deadline exceeded"))
+            ctx.attempts.append(h._attempt(target, "deadline", 0, "deadline exceeded"))
             return False
         t0 = time.monotonic()
-        gen = stream_fn(target, request, timeout)
+        gen = stream_fn(target, ctx.request, timeout)
         try:
             first: StreamChunk | None = next(gen)
         except StopIteration:
             first = None
         except TerminalError as exc:
-            self._circuit.record_failure(target.provider)
-            attempts.append(self._attempt(target, "terminal", t0, str(exc)))
-            self._capture_stream_error(
-                request, meta, started, attempts, "terminal", str(exc), target.name
-            )
+            h._circuit.record_failure(target.provider)
+            ctx.attempts.append(h._attempt(target, "terminal", t0, str(exc)))
+            self._error(ctx, "terminal", str(exc), target.name)
             raise
         except (RetriableError, TimeoutError) as exc:
-            self._circuit.record_failure(target.provider)
-            attempts.append(self._attempt(target, "retriable", t0, str(exc)))
+            h._circuit.record_failure(target.provider)
+            ctx.attempts.append(h._attempt(target, "retriable", t0, str(exc)))
             return False
 
         parts: list[str] = []
@@ -138,41 +131,26 @@ class StreamRunnerMixin:
         tcs: list | None = None
         try:
             for chunk in itertools.chain([] if first is None else [first], gen):
-                if deadline is not None and time.monotonic() >= deadline:
+                if ctx.deadline is not None and time.monotonic() >= ctx.deadline:
                     # 开流后墙钟预算耗尽:逐块截断(已发部分保留),按 deadline 落库 + 收尾 done。
                     # 注:无法中断单个已阻塞的 next() 读取(那由 provider SDK 的 read timeout 兜),
                     # 本检查约束的是「长流/多块」的总墙钟,防止流式完全无视 deadline。
-                    attempts.append(
-                        self._attempt(
+                    ctx.attempts.append(
+                        h._attempt(
                             target, "deadline", t0, "deadline exceeded mid-stream"
                         )
                     )
-                    self._capturer.record(
-                        request,
-                        meta,
-                        started,
-                        model_resolved=target.name,
-                        attempts=attempts,
-                        resp=NormalizedResponse(
+                    self._capture(
+                        ctx,
+                        target.name,
+                        NormalizedResponse(
                             text="".join(parts),
                             finish_reason="length",
                             input_tokens=it,
                             output_tokens=ot,
                         ),
-                        status="deadline",
-                        cache_hit=False,
-                        cache_key=None,
-                        error_type="deadline",
-                        error_message=None,
-                    )
-                    self._capturer.log(
-                        request,
-                        meta,
                         "deadline",
-                        target.name,
                         "deadline",
-                        False,
-                        started,
                     )
                     yield StreamChunk(
                         done=True,
@@ -194,38 +172,29 @@ class StreamRunnerMixin:
                     parts.append(chunk.text)
                     yield chunk
         except Exception as exc:
-            self._circuit.record_failure(target.provider)
-            attempts.append(self._attempt(target, "stream_error", t0, str(exc)))
-            self._capture_stream_error(
-                request, meta, started, attempts, "stream", str(exc), target.name
-            )
+            h._circuit.record_failure(target.provider)
+            ctx.attempts.append(h._attempt(target, "stream_error", t0, str(exc)))
+            self._error(ctx, "stream", str(exc), target.name)
             raise GatewayError(str(exc)) from exc
         except BaseException:
-            attempts.append(self._attempt(target, "aborted", t0, "client disconnected"))
-            self._capturer.record(
-                request,
-                meta,
-                started,
-                model_resolved=target.name,
-                attempts=attempts,
-                resp=NormalizedResponse(
+            ctx.attempts.append(
+                h._attempt(target, "aborted", t0, "client disconnected")
+            )
+            self._capture(
+                ctx,
+                target.name,
+                NormalizedResponse(
                     text="".join(parts),
                     finish_reason=fr,
                     input_tokens=it,
                     output_tokens=ot,
                 ),
-                status="aborted",
-                cache_hit=False,
-                cache_key=None,
-                error_type="client_abort",
-                error_message=None,
-            )
-            self._capturer.log(
-                request, meta, "aborted", target.name, "client_abort", False, started
+                "aborted",
+                "client_abort",
             )
             raise
-        self._circuit.record_success(target.provider)
-        attempts.append(self._attempt(target, "success", t0, None))
+        h._circuit.record_success(target.provider)
+        ctx.attempts.append(h._attempt(target, "success", t0, None))
         resp = NormalizedResponse(
             text="".join(parts),
             finish_reason=fr,
@@ -233,7 +202,7 @@ class StreamRunnerMixin:
             output_tokens=ot,
             tool_calls=len(tcs or []),
         )
-        self._capture_stream_ok(request, meta, started, target, attempts, resp, idx)
+        self._ok(ctx, target, resp, idx)
         yield StreamChunk(
             done=True,
             finish_reason=fr,
@@ -254,39 +223,45 @@ class StreamRunnerMixin:
             output_tokens=resp.output_tokens,
         )
 
-    def _capture_stream_ok(self, request, meta, started, target, attempts, resp, idx):
-        status = "success" if idx == 0 else "fallback_success"
-        self._capturer.record(
-            request,
-            meta,
-            started,
-            model_resolved=target.name,
-            attempts=attempts,
+    # ── 捕获便捷(ctx 折叠 request/meta/started)──────────────────────────────
+
+    def _capture(self, ctx: CallCtx, model_resolved, resp, status, error_type) -> None:
+        self._host._capturer.record(
+            ctx.request,
+            ctx.meta,
+            ctx.started,
+            model_resolved=model_resolved,
+            attempts=ctx.attempts,
             resp=resp,
             status=status,
             cache_hit=False,
             cache_key=None,
-            error_type=None,
+            error_type=error_type,
             error_message=None,
         )
-        self._capturer.log(request, meta, status, target.name, None, False, started)
+        self._host._capturer.log(
+            ctx.request,
+            ctx.meta,
+            status,
+            model_resolved,
+            error_type,
+            False,
+            ctx.started,
+        )
 
-    def _capture_stream_error(
-        self,
-        request,
-        meta,
-        started,
-        attempts,
-        error_type,
-        error_message,
-        model_resolved=None,
-    ):
-        self._capturer.record(
-            request,
-            meta,
-            started,
+    def _ok(self, ctx: CallCtx, target, resp, idx: int) -> None:
+        status = "success" if idx == 0 else "fallback_success"
+        self._capture(ctx, target.name, resp, status, None)
+
+    def _error(
+        self, ctx: CallCtx, error_type, error_message, model_resolved=None
+    ) -> None:
+        self._host._capturer.record(
+            ctx.request,
+            ctx.meta,
+            ctx.started,
             model_resolved=model_resolved,
-            attempts=attempts,
+            attempts=ctx.attempts,
             resp=None,
             status="error",
             cache_hit=False,
@@ -294,6 +269,12 @@ class StreamRunnerMixin:
             error_type=error_type,
             error_message=error_message,
         )
-        self._capturer.log(
-            request, meta, "error", model_resolved, error_type, False, started
+        self._host._capturer.log(
+            ctx.request,
+            ctx.meta,
+            "error",
+            model_resolved,
+            error_type,
+            False,
+            ctx.started,
         )

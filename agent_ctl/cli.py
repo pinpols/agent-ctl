@@ -252,7 +252,11 @@ def _pricing_problems(
             target = Target.parse(spec)
         except ValueError:
             continue
-        if not strict_alias_prices and available is not None and target.provider not in available:
+        if (
+            not strict_alias_prices
+            and available is not None
+            and target.provider not in available
+        ):
             continue
         if not _price_exists(cfg, target):
             problems.append(
