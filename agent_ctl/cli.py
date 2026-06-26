@@ -130,7 +130,15 @@ def _cmd_doctor(cfg, args) -> int:
     if cfg.profile == "prod" and not cfg.prices:
         problems.append("prod profile 下 prices 为空:成本将全为 None")
     if cfg.profile == "prod":
-        problems.extend(_pricing_problems(cfg))
+        from agent_ctl.providers.catalog import available_providers
+
+        problems.extend(
+            _pricing_problems(
+                cfg,
+                available=set(available_providers()),
+                strict_alias_prices=args.strict_alias_prices,
+            )
+        )
     if problems:
         for p in problems:
             print("FAIL:", p)
@@ -194,6 +202,7 @@ def _cmd_serve(cfg, args) -> int:
         max_request_bytes=args.max_request_bytes,
         rate_limit_per_minute=args.rate_limit_per_minute,
         trust_proxy_headers=args.trust_proxy_headers,
+        trusted_proxy_cidrs=args.trusted_proxy_cidr,
         allow_direct_models=cfg.allow_direct_models,
     )
     uvicorn.run(app, host=args.host, port=args.port)
@@ -219,16 +228,15 @@ def _price_exists(cfg, target: Target) -> bool:
     return target.name in cfg.prices or target.model in cfg.prices
 
 
-def _pricing_problems(cfg) -> list[str]:
+def _pricing_problems(
+    cfg, *, available: set[str] | None = None, strict_alias_prices: bool = False
+) -> list[str]:
     problems: list[str] = []
     specs = [
         (f"route {logical!r}", spec)
         for logical, targets in cfg.routes.items()
         for spec in targets
     ]
-    specs.extend(
-        (f"alias {alias!r}", spec) for alias, spec in cfg.model_aliases.items()
-    )
     for label, spec in specs:
         try:
             target = Target.parse(spec)
@@ -237,6 +245,18 @@ def _pricing_problems(cfg) -> list[str]:
         if not _price_exists(cfg, target):
             problems.append(
                 f"{label} → {spec!r}: prod profile 缺少价格配置 "
+                f"(需要 prices.{target.name!r} 或 prices.{target.model!r})"
+            )
+    for alias, spec in cfg.model_aliases.items():
+        try:
+            target = Target.parse(spec)
+        except ValueError:
+            continue
+        if not strict_alias_prices and available is not None and target.provider not in available:
+            continue
+        if not _price_exists(cfg, target):
+            problems.append(
+                f"alias {alias!r} → {spec!r}: prod profile 缺少价格配置 "
                 f"(需要 prices.{target.name!r} 或 prices.{target.model!r})"
             )
     return problems
@@ -278,7 +298,12 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--since", help="Unix timestamp, Nh, or Nd")
     p_schema = sub.add_parser("config-schema", help="输出 Config JSON Schema")
     p_schema.add_argument("--out", help="输出文件;省略则写 stdout")
-    sub.add_parser("doctor")
+    p_doc = sub.add_parser("doctor")
+    p_doc.add_argument(
+        "--strict-alias-prices",
+        action="store_true",
+        help="prod profile 下也检查当前实例未启用 provider 的 alias 价格",
+    )
     sub.add_parser("version")
     p_serve = sub.add_parser("serve")
     p_serve.add_argument("--host", default="127.0.0.1")
@@ -288,6 +313,12 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--max-request-bytes", type=int, default=1_000_000)
     p_serve.add_argument("--rate-limit-per-minute", type=int, default=120)
     p_serve.add_argument("--trust-proxy-headers", action="store_true")
+    p_serve.add_argument(
+        "--trusted-proxy-cidr",
+        action="append",
+        default=None,
+        help="可信反代来源 CIDR;可重复。设置后仅这些来源的 X-Forwarded-For 会被信任",
+    )
     args = parser.parse_args(argv)
     cfg = (
         None

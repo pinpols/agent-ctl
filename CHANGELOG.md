@@ -8,6 +8,15 @@ The project follows semantic versioning for public CLI/API behavior:
 - **MINOR**: backward-compatible features and new provider capabilities.
 - **PATCH**: bug fixes, docs, tests, and internal refactors.
 
+## [Unreleased]
+
+### Changed
+
+- Split auth-failure and business request rate limit buckets; successful `/metrics` scrapes no longer consume business quota.
+- Added trusted proxy CIDR filtering for `X-Forwarded-For` handling; proxy headers now default to local-only trust.
+- Updated prod `doctor` alias price checks to respect currently available providers, with `--strict-alias-prices` for shared config validation.
+- Expanded `constraints.txt` to a fully resolved runtime dependency constraints file.
+
 ## [0.1.0] - 2026-06-25
 
 Initial local AgentOps gateway release.

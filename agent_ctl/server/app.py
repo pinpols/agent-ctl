@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from collections import OrderedDict, deque
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from json import JSONDecodeError
 
 from fastapi import Request
@@ -18,6 +19,8 @@ from agent_ctl.errors import (
     TerminalError,
 )
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
+
+_DEFAULT_TRUSTED_PROXY_CIDRS = ("127.0.0.1/32", "::1/128")
 
 
 def _consumer_of(body: dict) -> str:
@@ -292,6 +295,7 @@ def build_server(
     max_request_bytes: int = 1_000_000,
     rate_limit_per_minute: int = 120,
     trust_proxy_headers: bool = False,
+    trusted_proxy_cidrs: list[str] | None = None,
     allow_direct_models: bool = True,
 ):
     """构造 OpenAI 兼容网关 FastAPI app。
@@ -306,6 +310,14 @@ def build_server(
     app = FastAPI(title="agent-ctl OpenAI-compatible gateway")
     listed = list(models or [])
     listed_set = set(listed)
+    proxy_cidrs = (
+        _DEFAULT_TRUSTED_PROXY_CIDRS
+        if trust_proxy_headers and trusted_proxy_cidrs is None
+        else trusted_proxy_cidrs or []
+    )
+    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = tuple(
+        ip_network(cidr, strict=False) for cidr in proxy_cidrs
+    )
 
     def _direct_model_blocked(model: str):
         """禁止用 "provider/model" 直连未登记目标(绕过路由白名单 = 绕过成本治理)。"""
@@ -323,6 +335,7 @@ def build_server(
     # LRU 有界:仅按时间裁剪每个 bucket 不清理空闲 IP 的 key → 公网多 IP 会无界增长。
     # 用 OrderedDict 钉住被追踪客户端数,超界淘汰最久未见的 IP。
     request_buckets: OrderedDict[str, deque[float]] = OrderedDict()
+    auth_failure_buckets: OrderedDict[str, deque[float]] = OrderedDict()
     max_clients = 10_000
 
     @app.middleware("http")
@@ -339,27 +352,33 @@ def build_server(
                 status_code=413,
                 content=_error_body("request too large", "request_too_large"),
             )
-        if rate_limit_per_minute > 0 and request.url.path != "/healthz":
-            client = _rate_limit_key(request, trust_proxy_headers)
-            now_ts = time.monotonic()
-            bucket = request_buckets.get(client)
-            if bucket is None:
-                bucket = deque()
-                request_buckets[client] = bucket
-            request_buckets.move_to_end(client)  # 最近见过
-            while bucket and now_ts - bucket[0] > 60:
-                bucket.popleft()
-            if len(bucket) >= rate_limit_per_minute:
+        auth_error = _auth_error(request, api_token, metrics_token)
+        if auth_error is not None:
+            if rate_limit_per_minute > 0 and _rate_limited(
+                auth_failure_buckets,
+                _rate_limit_key(request, trust_proxy_headers, trusted_proxy_networks),
+                rate_limit_per_minute,
+                max_clients,
+            ):
                 return JSONResponse(
                     status_code=429,
                     content=_error_body("rate limit exceeded", "rate_limit_exceeded"),
                 )
-            bucket.append(now_ts)
-            while len(request_buckets) > max_clients:
-                request_buckets.popitem(last=False)  # 淘汰最久未见的客户端
-        auth_error = _auth_error(request, api_token, metrics_token)
-        if auth_error is not None:
             return JSONResponse(status_code=401, content=auth_error)
+        if (
+            rate_limit_per_minute > 0
+            and request.url.path not in {"/healthz", "/metrics"}
+            and _rate_limited(
+                request_buckets,
+                _rate_limit_key(request, trust_proxy_headers, trusted_proxy_networks),
+                rate_limit_per_minute,
+                max_clients,
+            )
+        ):
+            return JSONResponse(
+                status_code=429,
+                content=_error_body("rate limit exceeded", "rate_limit_exceeded"),
+            )
         return await call_next(request)
 
     @app.get("/healthz")
@@ -504,9 +523,47 @@ def _auth_error(
     return None
 
 
-def _rate_limit_key(request: Request, trust_proxy_headers: bool) -> str:
-    if trust_proxy_headers:
+def _rate_limited(
+    buckets: OrderedDict[str, deque[float]],
+    client: str,
+    limit: int,
+    max_clients: int,
+) -> bool:
+    now_ts = time.monotonic()
+    bucket = buckets.get(client)
+    if bucket is None:
+        bucket = deque()
+        buckets[client] = bucket
+    buckets.move_to_end(client)  # 最近见过
+    while bucket and now_ts - bucket[0] > 60:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        return True
+    bucket.append(now_ts)
+    while len(buckets) > max_clients:
+        buckets.popitem(last=False)  # 淘汰最久未见的客户端
+    return False
+
+
+def _rate_limit_key(
+    request: Request,
+    trust_proxy_headers: bool,
+    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
+) -> str:
+    if trust_proxy_headers and _client_is_trusted_proxy(request, trusted_proxy_networks):
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
             return f"xff:{forwarded_for.split(',', 1)[0].strip()}"
     return request.client.host if request.client else "unknown"
+
+
+def _client_is_trusted_proxy(
+    request: Request, trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...]
+) -> bool:
+    if not request.client:
+        return False
+    try:
+        client_ip = ip_address(request.client.host)
+    except ValueError:
+        return False
+    return any(client_ip in network for network in trusted_proxy_networks)

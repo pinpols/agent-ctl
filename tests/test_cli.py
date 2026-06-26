@@ -213,7 +213,7 @@ def test_doctor_warns_on_inconsistent_fallback_capabilities(
     assert "embed" in out  # 指出 embed 能力在目标间不一致
 
 
-def test_doctor_prod_requires_prices_for_routes_and_aliases(
+def test_doctor_prod_skips_alias_prices_for_unavailable_providers(
     tmp_path, capsys, monkeypatch
 ):
     monkeypatch.setattr(
@@ -226,10 +226,53 @@ def test_doctor_prod_requires_prices_for_routes_and_aliases(
             db_path=str(tmp_path / "c.db"),
         ),
     )
+    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", lambda: [])
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "OK" in out
+
+
+def test_doctor_prod_requires_alias_prices_for_available_providers(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"default": ["openai/gpt-4o"]},
+            model_aliases={"mini": "openai/gpt-4o-mini"},
+            prices={"gpt-4o": (1.0, 2.0)},
+            profile="prod",
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_ctl.providers.catalog.available_providers", lambda: ["openai"]
+    )
     rc = main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 1
     assert "gpt-4o-mini" in out
+
+
+def test_doctor_strict_alias_prices_checks_unavailable_providers(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"default": ["openai/gpt-4o"]},
+            model_aliases={"mini": "anthropic/claude-sonnet-4-6"},
+            prices={"gpt-4o": (1.0, 2.0)},
+            profile="prod",
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", lambda: [])
+    rc = main(["doctor", "--strict-alias-prices"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "claude-sonnet-4-6" in out
 
 
 def test_serve_rejects_non_local_without_token_before_provider_setup(
@@ -277,7 +320,9 @@ def test_serve_models_include_routes_and_aliases(tmp_path, monkeypatch):
             db_path=str(tmp_path / "c.db"),
         ),
     )
-    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", lambda: ["fake"])
+    monkeypatch.setattr(
+        "agent_ctl.providers.catalog.available_providers", lambda: ["fake"]
+    )
     monkeypatch.setattr(
         "agent_ctl.providers.catalog.build_providers",
         lambda: {"fake": FakeProvider(["ok"])},

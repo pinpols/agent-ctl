@@ -12,9 +12,7 @@ _PATTERNS = [
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),  # GitHub tokens
     re.compile(r"(?i)bearer\s+[A-Za-z0-9\-_.]+"),  # bearer
     re.compile(r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+"),  # JWT
-    re.compile(
-        r"(?i)\b(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[^'\"\s,;]+"
-    ),
+    re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[^'\"\s,;]+"),
     re.compile(
         r"(?i)\b[A-Z0-9_]*(API_KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_]*"
         r"\s*[:=]\s*['\"]?[^'\"\s,;]+"

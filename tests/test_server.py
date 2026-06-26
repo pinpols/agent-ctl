@@ -461,6 +461,21 @@ def test_metrics_auth_failures_consume_rate_limit():
     )
 
 
+def test_metrics_successes_skip_business_rate_limit():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            api_token="api-secret",
+            metrics_token="metrics-secret",
+            rate_limit_per_minute=1,
+        )
+    )
+    headers = {"Authorization": "Bearer metrics-secret"}
+    assert c.get("/metrics", headers=headers).status_code == 200
+    assert c.get("/metrics", headers=headers).status_code == 200
+
+
 def test_metrics_falls_back_to_api_token_when_no_metrics_token():
     c = TestClient(
         build_server(
@@ -571,6 +586,10 @@ def test_auth_failures_consume_rate_limit():
         c.get("/v1/models", headers={"Authorization": "Bearer wrong2"}).status_code
         == 429
     )
+    assert (
+        c.get("/v1/models", headers={"Authorization": "Bearer secret"}).status_code
+        == 200
+    )
 
 
 def test_healthz_skips_auth_and_rate_limit():
@@ -593,7 +612,8 @@ def test_rate_limit_can_trust_forwarded_for():
             now=lambda: 1234,
             rate_limit_per_minute=1,
             trust_proxy_headers=True,
-        )
+        ),
+        client=("127.0.0.1", 12345),
     )
     assert (
         c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
@@ -603,6 +623,27 @@ def test_rate_limit_can_trust_forwarded_for():
     )
     assert (
         c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 429
+    )
+
+
+def test_rate_limit_ignores_forwarded_for_from_untrusted_proxy():
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            rate_limit_per_minute=1,
+            trust_proxy_headers=True,
+            trusted_proxy_cidrs=["10.0.0.0/8"],
+        ),
+        client=("192.0.2.10", 12345),
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "198.51.100.1"}).status_code
+        == 200
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "198.51.100.2"}).status_code
+        == 429
     )
 
 
