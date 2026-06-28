@@ -6,6 +6,7 @@ Requires-Dist: pydantic>=2
 Requires-Dist: pyyaml>=6
 Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-cov>=5; extra == "dev"
 Requires-Dist: ruff>=0.5; extra == "dev"
 Requires-Dist: mypy>=1.10; extra == "dev"
 Requires-Dist: types-PyYAML>=6; extra == "dev"

@@ -1,0 +1,52 @@
+name: Security Scan
+
+# SAST(纯 CI 跑,不依赖 GitHub Advanced Security / code scanning):
+# - Bandit:高严重度作硬门禁(当前 0 高危,防未来引入);中/低危见 artifact
+# - Semgrep:规则集扫描,报告制(artifact),不阻塞
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bandit:
+    name: Bandit (Python SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install "bandit[toml]"
+      # 高严重度 = 硬门禁(失败即红);完整报告(含中/低)留 artifact
+      - run: bandit -r agent_ctl --severity-level high
+      - run: bandit -r agent_ctl -f json -o bandit-report.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  semgrep:
+    name: Semgrep (SAST rules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          pip install semgrep
+          semgrep --config=p/python --config=p/security-audit \
+            agent_ctl --json -o semgrep-report.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
