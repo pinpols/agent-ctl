@@ -139,6 +139,7 @@ def test_stream_connect_error_is_typed():
 
 def test_classify_status():
     assert classify_status(429) == "retriable"
+    assert classify_status(408) == "retriable"  # P2-7:Request Timeout 是瞬时态
     assert classify_status(529) == "retriable"
     assert classify_status(500) == "retriable"
     assert classify_status(401) == "terminal"

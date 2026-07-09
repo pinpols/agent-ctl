@@ -11,8 +11,9 @@ from agent_ctl.errors import GatewayError, RetriableError, TerminalError
 
 
 def classify_status(status: int) -> str:
-    """HTTP 状态 → retriable/terminal。429 与 5xx 可重试,其余 4xx 终态。"""
-    if status == 429 or status >= 500:
+    """HTTP 状态 → retriable/terminal。408(请求超时)/429/5xx 可重试,其余 4xx 终态。
+    408 与超时/网络错误同类,是瞬时态,归 terminal 会白白放弃可救的调用。"""
+    if status in (408, 429) or status >= 500:
         return "retriable"
     return "terminal"
 
