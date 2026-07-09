@@ -176,11 +176,43 @@ def test_openai_messages_to_anthropic_tool_loop():
     assert out[1]["content"] == [
         {"type": "tool_use", "id": "c1", "name": "f", "input": {"x": 1}}
     ]
-    # 连续两条 role=tool 合并成一条 user 消息(Anthropic 角色交替约束)
+    # 连续两条 role=tool 合并成一条 user 消息,且紧随的 user 文本并入同一条
+    # (P2-a:否则连续两条 user 违反 Anthropic 角色交替约束)
+    assert len(out) == 3
     assert out[2]["role"] == "user"
-    assert [b["tool_use_id"] for b in out[2]["content"]] == ["c1", "c2"]
-    assert all(b["type"] == "tool_result" for b in out[2]["content"])
-    assert out[3] == {"role": "user", "content": "continue"}
+    assert [b["tool_use_id"] for b in out[2]["content"][:2]] == ["c1", "c2"]
+    assert all(b["type"] == "tool_result" for b in out[2]["content"][:2])
+    assert out[2]["content"][2] == {"type": "text", "text": "continue"}
+
+
+def test_user_after_tool_results_merges_into_single_user_message():
+    """P2-a:tool_result 后紧跟的 user 内容(含块数组形)并入同一条 user 消息。"""
+    msgs = [
+        {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "再看这个"},
+                {"type": "image_url", "image_url": {"url": "https://x/1.png"}},
+            ],
+        },
+    ]
+    out = openai_messages_to_anthropic(msgs)
+    assert len(out) == 1
+    assert out[0]["role"] == "user"
+    assert out[0]["content"][0]["type"] == "tool_result"
+    assert out[0]["content"][1] == {"type": "text", "text": "再看这个"}
+    assert out[0]["content"][2]["type"] == "image"
+    # 无紧随 user 时行为不变:trailing tool_result 仍单独成 user 消息
+    only_tool = openai_messages_to_anthropic(
+        [{"role": "tool", "tool_call_id": "c9", "content": "r"}]
+    )
+    assert only_tool == [
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "c9", "content": "r"}],
+        }
+    ]
 
 
 def test_stop_reason_to_finish_mapping():
