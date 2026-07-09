@@ -179,3 +179,60 @@ def test_iter_all_memory_db():
     store.save(_rec("a", 0.0, ts=1))
     store.save(_rec("b", 0.0, ts=2))
     assert [r.id for r in store.iter_all()] == ["a", "b"]
+
+
+# ── 深审 round4 P2-12:启动回填只跑一次(marker),不每次全量重扫 error 记录 ──
+
+
+def test_backfill_not_rerun_on_reopen(tmp_path, monkeypatch):
+    """error 记录 model_resolved 合法为 NULL,老实现每次启动都全量重扫重写;
+    回填完成后应打标记,再次打开不再扫。"""
+    path = str(tmp_path / "c.db")
+    with SqliteCaptureStore(path) as s:
+        s.save(
+            CallRecord(
+                id="err1", ts=1.0, consumer="t", status="error",
+                model_requested="m", model_resolved=None,
+            )
+        )
+    calls = []
+    monkeypatch.setattr(
+        SqliteCaptureStore,
+        "_backfill_model_columns",
+        lambda self: calls.append(1),
+    )
+    with SqliteCaptureStore(path):
+        pass
+    assert calls == []  # 标记已在 → 不再重扫
+
+
+def test_backfill_runs_for_legacy_db_then_marks(tmp_path):
+    """老库(无 model_* 列、无标记)→ 补列 + 回填 + 打标;再开不重跑。"""
+    path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE call_record (id TEXT PRIMARY KEY, ts REAL, consumer TEXT,"
+        " status TEXT, input_tokens INTEGER, output_tokens INTEGER,"
+        " cost_usd REAL, doc TEXT NOT NULL)"
+    )
+    doc = CallRecord(
+        id="old1", ts=1.0, consumer="t", status="success",
+        model_requested="fake/m", model_resolved="fake/m",
+    ).model_dump_json()
+    conn.execute(
+        "INSERT INTO call_record (id, ts, consumer, status, input_tokens,"
+        " output_tokens, cost_usd, doc) VALUES ('old1',1.0,'t','success',0,0,0,?)",
+        (doc,),
+    )
+    conn.commit()
+    conn.close()
+    with SqliteCaptureStore(path) as s:
+        rows = s._conn.execute(
+            "SELECT model_requested, model_resolved FROM call_record"
+        ).fetchall()
+        assert rows[0]["model_requested"] == "fake/m"
+        assert rows[0]["model_resolved"] == "fake/m"
+        marked = s._conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = 2"
+        ).fetchone()
+        assert marked is not None
