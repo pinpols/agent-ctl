@@ -363,3 +363,121 @@ def test_stream_deadline_truncates_long_stream(tmp_path):
     assert len(texts) < 20  # 没把整条流跑完
     rec = store.list_recent(1)[0]
     assert rec.status == "deadline"
+
+
+# ── 深审 round4:P1-2 首块非类型化异常回退 / P1-4 流式异常路径成本 / P2-10 gen.close ──
+
+
+class MeteredStreamProvider:
+    """先产出带 input_tokens 的计量块(模拟 Anthropic message_start),再产文本。
+    closed 标记 provider 生成器是否被显式关闭(GeneratorExit/close)。"""
+
+    def __init__(self, parts, it=10, mid_error=None, first_error=None):
+        self._parts = parts
+        self._it = it
+        self._mid_error = mid_error
+        self._first_error = first_error
+        self.closed = False
+        self.calls = 0
+
+    def invoke(self, target, request, timeout):
+        raise NotImplementedError
+
+    def stream(self, target, request, timeout):
+        self.calls += 1
+        try:
+            if self._first_error:
+                raise self._first_error
+            yield StreamChunk(input_tokens=self._it)  # 计量块(无文本,非 done)
+            for i, p in enumerate(self._parts):
+                if self._mid_error and i == 1:
+                    raise self._mid_error
+                yield StreamChunk(text=p)
+            yield StreamChunk(
+                done=True, finish_reason="stop", input_tokens=self._it, output_tokens=5
+            )
+        finally:
+            self.closed = True
+
+
+def test_stream_untyped_first_chunk_error_falls_back_with_record(tmp_path):
+    """P1-2:provider SSE 迭代首块抛非类型化异常(如 ConnectionResetError)不得裸穿透,
+    应回退到下一目标,且有 CallRecord(fallback_success + 首跳 attempt 记 retriable)。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    bad = MeteredStreamProvider([], first_error=ConnectionResetError("reset by peer"))
+    good = FakeStreamProvider(["ok"])
+    cb = CircuitBreaker(failure_threshold=1, cooldown_s=30.0)
+    gw = _gw(
+        {"bad": bad, "good": good}, {"default": ["bad/m", "good/m"]}, store, circuit=cb
+    )
+    chunks = list(gw.invoke_stream(REQ))
+    assert "".join(c.text for c in chunks if not c.done) == "ok"
+    assert bad.calls == 1 and good.calls == 1
+    rec = store.list_recent(1)[0]
+    assert rec.status == "fallback_success"
+    assert rec.attempts[0].outcome == "retriable"
+    assert "reset by peer" in (rec.attempts[0].error or "")
+    assert cb.allow("bad") is False  # 熔断有记账
+
+
+def test_stream_client_abort_records_cost(tmp_path):
+    """P1-4:客户端中途断流时,provider 已在 message_start 报过 input_tokens,
+    aborted 记录须按最后已知计量计成本(>0),不再恒 0。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = MeteredStreamProvider(["a", "b", "c"], it=1000)
+    gw = _gw({"s": p}, {"default": ["s/m"]}, store)
+    gen = gw.invoke_stream(REQ)
+    first = next(gen)
+    assert first.text == "a"
+    gen.close()
+    rec = store.list_recent(1)[0]
+    assert rec.status == "aborted"
+    assert rec.input_tokens == 1000  # 最后已知计量
+    assert rec.cost_usd is not None and rec.cost_usd > 0
+
+
+def test_stream_mid_error_records_cost_and_partial_text(tmp_path):
+    """P1-4:中途错误的 error 记录也带已知计量与已发文本(此前 resp=None → cost≈0)。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = MeteredStreamProvider(["a", "b"], it=1000, mid_error=RetriableError("drop"))
+    gw = _gw({"s": p}, {"default": ["s/m"]}, store)
+    with pytest.raises(GatewayError):
+        list(gw.invoke_stream(REQ))
+    rec = store.list_recent(1)[0]
+    assert rec.status == "error" and rec.error_type == "stream"
+    assert rec.input_tokens == 1000
+    assert rec.cost_usd is not None and rec.cost_usd > 0
+    assert rec.output_redacted == "a"
+
+
+def test_stream_deadline_truncation_closes_provider_gen(tmp_path):
+    """P2-10:deadline 截断 return 前须显式 gen.close(),不留半开的 provider 流。"""
+    import time as _t
+
+    class SlowMetered(MeteredStreamProvider):
+        def stream(self, target, request, timeout):
+            self.calls += 1
+            try:
+                yield StreamChunk(input_tokens=self._it)
+                for p in self._parts:
+                    _t.sleep(0.03)
+                    yield StreamChunk(text=p)
+                yield StreamChunk(done=True, finish_reason="stop")
+            finally:
+                self.closed = True
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = SlowMetered([str(i) for i in range(20)], it=1000)
+    gw = Gateway(
+        router=Router({"default": ["s/m"]}),
+        providers={"s": p},
+        cost_meter=CostMeter({"m": (1000.0, 1000.0)}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, timeout_s=60.0),
+        request_deadline_s=0.08,
+    )
+    list(gw.invoke_stream(REQ))
+    assert p.closed is True  # provider 生成器被显式关闭
+    rec = store.list_recent(1)[0]
+    assert rec.status == "deadline"
+    assert rec.input_tokens == 1000 and rec.cost_usd > 0  # P1-4:截断也计成本

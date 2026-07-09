@@ -168,7 +168,10 @@ class _StreamClient:
 def test_stream_parses_deltas_and_usage():
     client = _StreamClient()
     chunks = list(OpenAIProvider(client).stream(T, REQ, timeout=5.0))
-    assert [c.text for c in chunks if not c.done] == ["Hel", "lo"]
+    assert [c.text for c in chunks if not c.done and c.text] == ["Hel", "lo"]
+    # P1-4:usage 一到即产出计量块(非 done),异常路径按最后已知值计成本
+    meters = [c for c in chunks if not c.done and not c.text and c.input_tokens]
+    assert meters and meters[-1].input_tokens == 11 and meters[-1].output_tokens == 4
     done = chunks[-1]
     assert done.done and done.finish_reason == "stop"
     assert done.input_tokens == 11 and done.output_tokens == 4

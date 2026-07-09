@@ -124,6 +124,14 @@ class StreamRunner:
             h._circuit.record_failure(target.provider)
             ctx.attempts.append(h._attempt(target, "retriable", t0, str(exc)))
             return False
+        except Exception as exc:
+            # 首块拉取阶段的非类型化异常(provider SSE 迭代期,如 ConnectionResetError/
+            # httpx.ReadError)——此时一个字节都没发给客户端,按 retriable 处理:
+            # 计熔断 + 记 attempt + 回退到下一目标,与主循环的对称位置不同(那里已发字节
+            # 无法回退),不允许裸 500 穿透。TerminalError 已在上方直通。
+            h._circuit.record_failure(target.provider)
+            ctx.attempts.append(h._attempt(target, "retriable", t0, str(exc)))
+            return False
 
         parts: list[str] = []
         fr: str | None = None
@@ -152,6 +160,7 @@ class StreamRunner:
                         "deadline",
                         "deadline",
                     )
+                    gen.close()  # 显式关闭 provider 流,不留半开连接
                     yield StreamChunk(
                         done=True,
                         finish_reason="length",
@@ -161,12 +170,15 @@ class StreamRunner:
                     return True
                 if chunk is None:
                     continue
+                # running 计量:provider 可在 done 之前就产出带 token 数的计量块
+                # (Anthropic message_start 的 input_tokens / OpenAI 途中 usage 块),
+                # 随时更新,使 abort/中途错/deadline 截断按最后已知值计成本而非 0。
+                if chunk.input_tokens:
+                    it = chunk.input_tokens
+                if chunk.output_tokens:
+                    ot = chunk.output_tokens
                 if chunk.done:
-                    fr, it, ot = (
-                        chunk.finish_reason,
-                        chunk.input_tokens,
-                        chunk.output_tokens,
-                    )
+                    fr = chunk.finish_reason
                     tcs = chunk.tool_calls
                 elif chunk.text:
                     parts.append(chunk.text)
@@ -174,7 +186,19 @@ class StreamRunner:
         except Exception as exc:
             h._circuit.record_failure(target.provider)
             ctx.attempts.append(h._attempt(target, "stream_error", t0, str(exc)))
-            self._error(ctx, "stream", str(exc), target.name)
+            self._capture(
+                ctx,
+                target.name,
+                NormalizedResponse(
+                    text="".join(parts),
+                    finish_reason=fr,
+                    input_tokens=it,
+                    output_tokens=ot,
+                ),
+                "error",
+                "stream",
+                error_message=str(exc),
+            )
             raise GatewayError(str(exc)) from exc
         except BaseException:
             ctx.attempts.append(
@@ -225,7 +249,9 @@ class StreamRunner:
 
     # ── 捕获便捷(ctx 折叠 request/meta/started)──────────────────────────────
 
-    def _capture(self, ctx: CallCtx, model_resolved, resp, status, error_type) -> None:
+    def _capture(
+        self, ctx: CallCtx, model_resolved, resp, status, error_type, error_message=None
+    ) -> None:
         self._host._capturer.record(
             ctx.request,
             ctx.meta,
@@ -237,7 +263,7 @@ class StreamRunner:
             cache_hit=False,
             cache_key=None,
             error_type=error_type,
-            error_message=None,
+            error_message=error_message,
         )
         self._host._capturer.log(
             ctx.request,

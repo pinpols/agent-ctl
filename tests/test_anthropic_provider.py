@@ -123,7 +123,9 @@ class _StreamMessages:
 def test_stream_parses_anthropic_events():
     client = type("C", (), {"messages": _StreamMessages()})()
     chunks = list(AnthropicProvider(client).stream(T, REQ, timeout=5.0))
-    assert [c.text for c in chunks if not c.done] == ["Hi ", "there"]
+    assert [c.text for c in chunks if not c.done and c.text] == ["Hi ", "there"]
+    # P1-4:message_start 即产出 input_tokens 计量块(非 done),abort 时可计成本
+    assert chunks[0].input_tokens == 9 and not chunks[0].done and not chunks[0].text
     done = chunks[-1]
     assert done.done and done.finish_reason == "end_turn"
     assert done.input_tokens == 9 and done.output_tokens == 6
@@ -137,6 +139,7 @@ def test_stream_connect_error_is_typed():
 
 def test_classify_status():
     assert classify_status(429) == "retriable"
+    assert classify_status(408) == "retriable"  # P2-7:Request Timeout 是瞬时态
     assert classify_status(529) == "retriable"
     assert classify_status(500) == "retriable"
     assert classify_status(401) == "terminal"
@@ -176,3 +179,60 @@ def test_status_503_raises_retriable_error():
     p = AnthropicProvider(_FakeClientStatus(503))
     with pytest.raises(RetriableError):
         p.invoke(T, REQ, timeout=5.0)
+
+
+# ── 深审 round4 P1-3:OpenAI 形请求在边界翻成 Anthropic 形 ──
+
+
+def test_invoke_translates_openai_shaped_tools_and_messages():
+    client = _FakeClient("ok")
+    req = NormalizedRequest(
+        model="default",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": '{"x":1}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "r"},
+        ],
+        max_tokens=64,
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "f", "parameters": {"type": "object"}},
+            }
+        ],
+        tool_choice="required",
+    )
+    AnthropicProvider(client).invoke(T, req, timeout=5.0)
+    kw = client.messages.last_kwargs
+    assert kw["tools"] == [
+        {"name": "f", "description": "", "input_schema": {"type": "object"}}
+    ]
+    assert kw["tool_choice"] == {"type": "any"}
+    assert kw["messages"][1]["content"][0]["type"] == "tool_use"
+    assert kw["messages"][2]["content"][0]["type"] == "tool_result"
+
+
+def test_invoke_anthropic_shaped_request_passes_through_unchanged():
+    client = _FakeClient("ok")
+    req = NormalizedRequest(
+        model="default",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        tools=[{"name": "report", "input_schema": {"type": "object"}}],
+        tool_choice={"type": "tool", "name": "report"},
+    )
+    AnthropicProvider(client).invoke(T, req, timeout=5.0)
+    kw = client.messages.last_kwargs
+    assert kw["tools"] == [{"name": "report", "input_schema": {"type": "object"}}]
+    assert kw["tool_choice"] == {"type": "tool", "name": "report"}
+    assert kw["messages"] == [{"role": "user", "content": "hi"}]

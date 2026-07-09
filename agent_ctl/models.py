@@ -28,8 +28,10 @@ class NormalizedRequest(BaseModel):
     tools: list | None = None
     # 工具调用型消费者(如 ops-agent)需要这两项:system 提示 + 强制工具选择。
     # 缺省 None=不传,对纯文本路由消费者完全向后兼容。
+    # tool_choice 允许 str:OpenAI 约定的 "auto"/"required"/"none" 是合法值
+    # (server 与 tooltrans 均已支持 str),只收 dict 会把合法请求堵成 400。
     system: str | None = None
-    tool_choice: dict | None = None
+    tool_choice: dict | str | None = None
     metadata: dict = {}
 
 

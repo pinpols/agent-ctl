@@ -136,6 +136,10 @@ class OpenAIProvider:
             if usage:
                 input_tokens = getattr(usage, "prompt_tokens", 0) or 0
                 output_tokens = getattr(usage, "completion_tokens", 0) or 0
+                # 计量块:途中 usage 立即上报,异常路径按最后已知值计成本。
+                yield StreamChunk(
+                    input_tokens=input_tokens, output_tokens=output_tokens
+                )
         tool_calls = [
             {"id": f["id"], "name": f["name"], "arguments": f["args"]}
             for _, f in sorted(tool_frags.items())

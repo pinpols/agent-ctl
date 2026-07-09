@@ -112,3 +112,25 @@ def test_gateway_unlimited_budget_passes(tmp_path):
     for _ in range(3):
         gw.invoke(_req())  # 不限 → 全通过
     assert len(gw._providers["fake"].calls) == 3
+
+
+# ── 深审 round4 P2-11:按 consumer 的累计表有界(consumer 名客户端可控)──
+
+
+def test_spent_tracking_bounded_by_lru():
+    g = BudgetGuard(global_cap=1000.0, max_consumers=3)
+    for i in range(10):
+        g.add(f"c{i}", 0.01)
+    # 无界会留 10 个;有界(LRU)只留最近 3 个
+    assert g.tracked_consumers() == 3
+    assert g.spent("c9") > 0  # 最近的仍在
+    assert g.spent("c0") == 0.0  # 最老的被淘汰(仅丢明细,全局累计不受影响)
+    assert abs(g._global_spent - 0.1) < 1e-9
+
+
+def test_capped_consumers_never_evicted():
+    g = BudgetGuard(per_consumer={"vip": 5.0}, global_cap=1000.0, max_consumers=2)
+    g.add("vip", 1.0)
+    for i in range(10):
+        g.add(f"noise{i}", 0.01)
+    assert g.spent("vip") == 1.0  # 有 cap 的 consumer 淘汰会毁预算强制,必须钉住

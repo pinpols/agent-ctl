@@ -139,3 +139,61 @@ def test_open_circuit_records_success_resets(tmp_path):
     gw.invoke(REQ)  # pa ok
     # pa 三次都被尝试(从未开路),且第 2/3 次成功
     assert len(pa.calls) == 3
+
+
+# ── 深审 round4 P2-6:半开态显式建模 ──────────────────────────
+
+
+def test_half_open_grants_single_probe():
+    """冷却到期只放行一个探测,并发调用不得同时涌入。"""
+    clock = _Clock()
+    cb = CircuitBreaker(failure_threshold=2, cooldown_s=30.0, now=clock)
+    cb.record_failure("p")
+    cb.record_failure("p")
+    clock.t = 30.0
+    assert cb.allow("p") is True  # 探测名额
+    assert cb.allow("p") is False  # 探测在途,其余仍拒
+    assert cb.allow("p") is False
+
+
+def test_half_open_probe_failure_reopens_immediately():
+    """探测失败 → 立即回开路,不需要重新累计满 threshold(与 docstring 一致)。"""
+    clock = _Clock()
+    cb = CircuitBreaker(failure_threshold=3, cooldown_s=30.0, now=clock)
+    for _ in range(3):
+        cb.record_failure("p")
+    clock.t = 30.0
+    assert cb.allow("p") is True  # 半开探测
+    cb.record_failure("p")  # 探测失败(仅 1 次)
+    assert cb.allow("p") is False  # 立即回开路
+    clock.t = 59.9
+    assert cb.allow("p") is False  # 新一轮冷却
+    clock.t = 60.0
+    assert cb.allow("p") is True  # 冷却再到 → 再放一个探测
+
+
+def test_half_open_probe_success_closes():
+    clock = _Clock()
+    cb = CircuitBreaker(failure_threshold=2, cooldown_s=30.0, now=clock)
+    cb.record_failure("p")
+    cb.record_failure("p")
+    clock.t = 30.0
+    assert cb.allow("p") is True
+    cb.record_success("p")
+    assert cb.allow("p") is True  # 闭合,全放行
+    assert cb.allow("p") is True
+
+
+def test_half_open_probe_slot_expires_if_never_reported():
+    """探测方既没 record_success 也没 record_failure(如被 deadline 跳过)→
+    名额过一个冷却期后重新可授,避免永久卡死。"""
+    clock = _Clock()
+    cb = CircuitBreaker(failure_threshold=2, cooldown_s=30.0, now=clock)
+    cb.record_failure("p")
+    cb.record_failure("p")
+    clock.t = 30.0
+    assert cb.allow("p") is True  # 探测名额被拿走且未回报
+    clock.t = 45.0
+    assert cb.allow("p") is False
+    clock.t = 60.0
+    assert cb.allow("p") is True  # 名额过期重授

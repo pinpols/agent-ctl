@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -19,6 +20,7 @@ from agent_ctl.errors import (
     TerminalError,
 )
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.providers.tooltrans import stop_reason_to_finish
 
 _DEFAULT_TRUSTED_PROXY_CIDRS = ("127.0.0.1/32", "::1/128")
 
@@ -34,7 +36,7 @@ def _consumer_of(body: dict) -> str:
     return "openai-compat-server"
 
 
-def to_normalized(body: dict) -> NormalizedRequest:
+def to_normalized(body: dict, default_max_tokens: int = 1024) -> NormalizedRequest:
     """OpenAI /v1/chat/completions 请求体 → NormalizedRequest。
 
     OpenAI 允许多条 role=system;全部抽出按序合并到 NormalizedRequest.system
@@ -55,7 +57,7 @@ def to_normalized(body: dict) -> NormalizedRequest:
         else:
             rest.append(m)
     system = "\n\n".join(system_parts) if system_parts else None
-    max_tokens = body["max_tokens"] if "max_tokens" in body else 1024
+    max_tokens = body["max_tokens"] if "max_tokens" in body else default_max_tokens
     try:
         if isinstance(max_tokens, bool):
             raise ValueError
@@ -131,7 +133,9 @@ def to_openai_response(
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": resp.finish_reason or "stop",
+                # Anthropic 后端透出的 stop_reason(end_turn/max_tokens/tool_use)
+                # 映射回 OpenAI finish_reason;已是 OpenAI 值则原样。
+                "finish_reason": stop_reason_to_finish(resp.finish_reason) or "stop",
             }
         ],
         "usage": {
@@ -161,8 +165,16 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
     """把网关的 StreamChunk 流逐块编码为 OpenAI 兼容 SSE 帧(真·流式,逐块下发)。
 
     first 是 server 预拉的首块(用于把"开流前"错误降级为普通 HTTP 状态);其余从 gen
-    续取。中途异常会终止流(已发字节无法改 HTTP 状态)。
+    续取。中途异常会终止流(已发字节无法改 HTTP 状态)。客户端断开时 StreamingResponse
+    会 close 本生成器 → finally 显式关闭网关流(触发其 aborted 捕获与资源释放)。
     """
+    try:
+        yield from _sse_frames(first, gen, requested_model, created)
+    finally:
+        gen.close()
+
+
+def _sse_frames(first, gen, requested_model: str, created: int):
     import itertools
     import json as _json
 
@@ -185,7 +197,7 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
         if chunk is None:
             continue
         if chunk.done:
-            final_fr = chunk.finish_reason or "stop"
+            final_fr = stop_reason_to_finish(chunk.finish_reason) or "stop"
             in_tok, out_tok = chunk.input_tokens, chunk.output_tokens
             if chunk.tool_calls:
                 # 工具调用合并为一帧下发(OpenAI 形;客户端可正常重组)
@@ -297,15 +309,23 @@ def build_server(
     trust_proxy_headers: bool = False,
     trusted_proxy_cidrs: list[str] | None = None,
     allow_direct_models: bool = True,
+    default_max_tokens: int | None = None,
 ):
     """构造 OpenAI 兼容网关 FastAPI app。
 
     gateway: 已装配的 Gateway(注入,便于测试)。
     models: /v1/models 列出的模型名(可选)。
     now: 可注入的时间戳函数(测试用),默认 time.time。
+    default_max_tokens: 请求未带 max_tokens 时的默认值;None 时读环境变量
+        AGENT_CTL_DEFAULT_MAX_TOKENS,再缺省 1024(Anthropic 后端必填该字段,
+        不能不设;但 1024 对长回答太小,故开放配置)。
     """
     from fastapi import FastAPI
 
+    if default_max_tokens is None:
+        default_max_tokens = int(os.getenv("AGENT_CTL_DEFAULT_MAX_TOKENS", "1024"))
+    if default_max_tokens <= 0:
+        raise ValueError("default_max_tokens must be a positive integer")
     clock = now or (lambda: int(time.time()))
     app = FastAPI(title="agent-ctl OpenAI-compatible gateway")
     listed = list(models or [])
@@ -424,7 +444,7 @@ def build_server(
         if blocked is not None:
             return blocked
         try:
-            req = to_normalized(body)
+            req = to_normalized(body, default_max_tokens)
         except ValueError as exc:
             return JSONResponse(
                 status_code=400,
@@ -550,13 +570,30 @@ def _rate_limit_key(
     trust_proxy_headers: bool,
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
 ) -> str:
+    """限流键 = 真实客户端标识。
+
+    XFF 最左值是客户端可任意伪造的(攻击者每请求换一个即绕过限流);可信的是
+    **可信反代自己追加的右端条目**。因此从右往左跳过可信 CIDR 内的地址,取第一个
+    不可信地址作为真实客户端;整条链全可信(内网直连)则回退 socket 对端。"""
     if trust_proxy_headers and _client_is_trusted_proxy(
         request, trusted_proxy_networks
     ):
-        forwarded_for = request.headers.get("x-forwarded-for")
-        if forwarded_for:
-            return f"xff:{forwarded_for.split(',', 1)[0].strip()}"
+        forwarded_for = request.headers.get("x-forwarded-for") or ""
+        hops = [h.strip() for h in forwarded_for.split(",") if h.strip()]
+        for hop in reversed(hops):
+            if not _ip_in_networks(hop, trusted_proxy_networks):
+                return f"xff:{hop}"
     return request.client.host if request.client else "unknown"
+
+
+def _ip_in_networks(
+    value: str, networks: tuple[IPv4Network | IPv6Network, ...]
+) -> bool:
+    try:
+        addr = ip_address(value)
+    except ValueError:
+        return False  # 非法地址不可能是我们的可信反代 → 视为不可信(即真实客户端键)
+    return any(addr in network for network in networks)
 
 
 def _client_is_trusted_proxy(

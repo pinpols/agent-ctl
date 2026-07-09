@@ -7,18 +7,22 @@
 
 from __future__ import annotations
 
-from agent_ctl.errors import RetriableError, TerminalError
+from agent_ctl.errors import GatewayError, RetriableError, TerminalError
 
 
 def classify_status(status: int) -> str:
-    """HTTP 状态 → retriable/terminal。429 与 5xx 可重试,其余 4xx 终态。"""
-    if status == 429 or status >= 500:
+    """HTTP 状态 → retriable/terminal。408(请求超时)/429/5xx 可重试,其余 4xx 终态。
+    408 与超时/网络错误同类,是瞬时态,归 terminal 会白白放弃可救的调用。"""
+    if status in (408, 429) or status >= 500:
         return "retriable"
     return "terminal"
 
 
 def typed_error(exc: Exception) -> Exception:
-    """SDK 异常 → 类型化网关错误。有状态码按 4xx/5xx 分类,无状态码(网络)按可重试。"""
+    """SDK 异常 → 类型化网关错误。有状态码按 4xx/5xx 分类,无状态码(网络)按可重试。
+    已是类型化网关错误(如 tooltrans 的 TerminalError)则原样透传,不得降级为可重试。"""
+    if isinstance(exc, GatewayError):
+        return exc
     status = getattr(exc, "status_code", None)
     if status is None:
         return RetriableError(str(exc))  # 网络/未知 → 可重试

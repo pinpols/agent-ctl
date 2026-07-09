@@ -9,6 +9,8 @@ from pathlib import Path
 from agent_ctl.models import CallRecord
 
 SCHEMA_VERSION = 1
+# v2 = model_requested/model_resolved 列回填完成标记(见 _init_schema)
+_BACKFILL_MARKER_VERSION = 2
 
 
 class SqliteCaptureStore:
@@ -38,11 +40,11 @@ class SqliteCaptureStore:
                 " input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL,"
                 " doc TEXT NOT NULL)"
             )
-            self._ensure_columns()
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations ("
                 " version INTEGER PRIMARY KEY, applied_at REAL DEFAULT (unixepoch()))"
             )
+            self._ensure_columns()
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -72,7 +74,18 @@ class SqliteCaptureStore:
         for name in ("model_requested", "model_resolved"):
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE call_record ADD COLUMN {name} TEXT")
-        self._backfill_model_columns()
+        # 回填只跑一次:error 记录的 model_resolved 合法为 NULL,按 "IS NULL" 判断
+        # 会让每次启动都全量重扫重写这批行。回填完成即打 v2 标记,后续启动跳过。
+        marked = self._conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (_BACKFILL_MARKER_VERSION,),
+        ).fetchone()
+        if marked is None:
+            self._backfill_model_columns()
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (_BACKFILL_MARKER_VERSION,),
+            )
 
     def _backfill_model_columns(self) -> None:
         rows = self._conn.execute(

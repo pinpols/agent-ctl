@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 
 from agent_ctl.errors import BudgetExceeded
 
@@ -21,15 +22,21 @@ class BudgetGuard:
         self,
         per_consumer: dict[str, float] | None = None,
         global_cap: float | None = None,
+        max_consumers: int = 10_000,
     ) -> None:
         self._caps = dict(per_consumer or {})
         self._global_cap = global_cap
-        self._spent: dict[str, float] = {}
+        # 有界 LRU:consumer 名来自客户端可控的 user 字段,无界 dict 会被
+        # 海量伪造名撑爆内存(与 server 限流桶同款问题/同款治法)。淘汰只丢
+        # 未配 cap 的 consumer 的明细(其花费仍计入 _global_spent 标量);
+        # 配了 cap 的 consumer 淘汰会毁预算强制 → 永不淘汰。
+        self._max_consumers = max_consumers
+        self._spent: OrderedDict[str, float] = OrderedDict()
         self._global_spent = 0.0
         # 每 consumer 最近一次实际成本,作为 check 的"预留余量":在仍差约一次调用就触顶时
         # 即拒绝,把并发 in-flight 调用导致的越界窗口从"任意并发量"收紧到"约一次调用"。
         # 这是廉价的近似收紧,非精确预留引擎(精确/分布式预算见 ADR-0001 后置项)。
-        self._last_cost: dict[str, float] = {}
+        self._last_cost: OrderedDict[str, float] = OrderedDict()
         self._lock = threading.Lock()
 
     @property
@@ -64,8 +71,25 @@ class BudgetGuard:
             return
         with self._lock:
             self._spent[consumer] = self._spent.get(consumer, 0.0) + cost
+            self._spent.move_to_end(consumer)
             self._global_spent += cost
             self._last_cost[consumer] = cost
+            self._last_cost.move_to_end(consumer)
+            self._evict_locked()
+
+    def _evict_locked(self) -> None:
+        while len(self._spent) > self._max_consumers:
+            victim = next(
+                (k for k in self._spent if k not in self._caps), None
+            )  # 最久未见的无 cap consumer
+            if victim is None:
+                return  # 全是有 cap 的(数量由配置决定,天然有界)→ 不淘汰
+            del self._spent[victim]
+            self._last_cost.pop(victim, None)
+
+    def tracked_consumers(self) -> int:
+        with self._lock:
+            return len(self._spent)
 
     def spent(self, consumer: str) -> float:
         with self._lock:

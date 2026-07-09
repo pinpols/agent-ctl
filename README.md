@@ -89,6 +89,10 @@ By default the server binds to localhost. Pass an API token for any non-local us
 .venv/bin/agent-ctl --config agent_ctl.yaml serve --host 127.0.0.1 --port 8400 --api-token "$AGENT_CTL_API_TOKEN"
 ```
 
+Requests without `max_tokens` get a default of 1024. Override it with
+`--default-max-tokens N` or the `AGENT_CTL_DEFAULT_MAX_TOKENS` env var
+(explicit `max_tokens` in a request always wins).
+
 Then call:
 
 ```bash
