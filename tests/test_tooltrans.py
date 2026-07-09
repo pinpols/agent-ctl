@@ -194,8 +194,11 @@ def test_stop_reason_to_finish_mapping():
     assert stop_reason_to_finish(None) is None
 
 
-def test_image_url_block_rejected_openai_direction():
-    """P2-9:多模态 image_url 块不再静默丢弃,显式终态错(→ HTTP 400)。"""
+# ── 深审 round2(P1-c):图像不再一律 400——同形直通,跨形转换;音频仍显式拒绝 ──
+
+
+def test_image_url_http_converted_to_anthropic_url_source():
+    """形态 1:OpenAI image_url(http URL)→ Anthropic image url source。"""
     msgs = [
         {
             "role": "user",
@@ -205,16 +208,149 @@ def test_image_url_block_rejected_openai_direction():
             ],
         }
     ]
-    with pytest.raises(TerminalError, match="image_url"):
-        openai_messages_to_anthropic(msgs)
+    out = openai_messages_to_anthropic(msgs)
+    assert out[0]["content"][0] == {"type": "text", "text": "看这张图"}
+    assert out[0]["content"][1] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://x/1.png"},
+    }
 
 
-def test_image_block_rejected_anthropic_direction():
+def test_image_url_data_uri_converted_to_anthropic_base64_source():
+    """形态 2:OpenAI image_url(base64 data URI)→ Anthropic image base64 source。"""
     msgs = [
         {
             "role": "user",
-            "content": [{"type": "image", "source": {"type": "base64", "data": "x"}}],
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64,QUJD"},
+                }
+            ],
         }
     ]
-    with pytest.raises(TerminalError, match="image"):
+    out = openai_messages_to_anthropic(msgs)
+    assert out[0]["content"][0] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"},
+    }
+
+
+def test_native_anthropic_image_block_passthrough():
+    """形态 3(#3 之前的回归):Anthropic 原生 image 块直通,不再被 400。"""
+    block = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"},
+    }
+    msgs = [{"role": "user", "content": [block]}]
+    out = openai_messages_to_anthropic(msgs)
+    assert out[0]["content"][0] == block
+
+
+def test_non_base64_data_uri_rejected():
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png,x"}}
+            ],
+        }
+    ]
+    with pytest.raises(TerminalError, match="base64"):
+        openai_messages_to_anthropic(msgs)
+
+
+def test_anthropic_image_converted_to_openai_image_url():
+    """OpenAI 方向:Anthropic image base64 → data URI;url source → 直通 URL。"""
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "QUJD",
+                    },
+                },
+                {"type": "image", "source": {"type": "url", "url": "https://x/2.png"}},
+            ],
+        }
+    ]
+    out = anthropic_messages_to_openai(msgs)
+    assert out[0]["role"] == "user"
+    assert out[0]["content"] == [
+        {"type": "text", "text": "看"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+        {"type": "image_url", "image_url": {"url": "https://x/2.png"}},
+    ]
+
+
+def test_openai_form_image_url_passthrough_openai_direction():
+    """OpenAI 方向遇 OpenAI 形 image_url:对 OpenAI 后端本就原生支持 → 原样直通。"""
+    block = {"type": "image_url", "image_url": {"url": "https://x/1.png"}}
+    msgs = [{"role": "user", "content": [block]}]
+    out = anthropic_messages_to_openai(msgs)
+    assert out[0]["content"] == [block]
+
+
+def test_pure_text_blocks_still_join_to_string_openai_direction():
+    """无图像时保持既有行为:文本块并成字符串 content。"""
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "a"},
+                {"type": "text", "text": "b"},
+            ],
+        }
+    ]
+    assert anthropic_messages_to_openai(msgs) == [{"role": "user", "content": "ab"}]
+
+
+def test_input_audio_still_rejected_both_directions():
+    msgs = [{"role": "user", "content": [{"type": "input_audio", "input_audio": {}}]}]
+    with pytest.raises(TerminalError, match="input_audio"):
+        openai_messages_to_anthropic(msgs)
+    with pytest.raises(TerminalError, match="input_audio"):
         anthropic_messages_to_openai(msgs)
+
+
+# ── 深审 round2(P1-b):本地校验函数(供网关入口/HTTP 边界前置调用)──
+
+
+def test_validate_local_content_rejects_audio_and_bad_tool_choice():
+    from agent_ctl.providers.tooltrans import validate_local_content
+
+    with pytest.raises(TerminalError, match="input_audio"):
+        validate_local_content([{"role": "user", "content": [{"type": "input_audio"}]}])
+    with pytest.raises(TerminalError, match="tool_choice"):
+        validate_local_content([], tool_choice="weird")
+    with pytest.raises(TerminalError, match="base64"):
+        validate_local_content(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png,x"}}
+                    ],
+                }
+            ]
+        )
+    # 合法形态全放行
+    validate_local_content(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "https://x/1.png"}},
+                    {"type": "image", "source": {"type": "url", "url": "https://x"}},
+                ],
+            },
+        ],
+        tool_choice="auto",
+    )
+    validate_local_content([], tool_choice={"type": "tool", "name": "f"})

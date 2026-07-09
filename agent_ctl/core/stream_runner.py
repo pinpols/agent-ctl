@@ -16,6 +16,7 @@ from agent_ctl.errors import (
 )
 from agent_ctl.models import NormalizedRequest, NormalizedResponse, StreamChunk
 from agent_ctl.providers.base import StreamingProvider
+from agent_ctl.providers.tooltrans import validate_local_content
 
 
 class StreamRunner:
@@ -34,6 +35,12 @@ class StreamRunner:
         started = time.monotonic()
         meta = request.metadata or {}
         ctx = CallCtx(request=request, meta=meta, started=started, deadline=None)
+        try:
+            # 本地终态校验前置:不进 provider 路径,不污染熔断(与 Gateway.invoke 对称)
+            validate_local_content(request.messages, request.tool_choice)
+        except TerminalError as exc:
+            self._error(ctx, "validation", str(exc))
+            raise
         try:
             h._budget.check(meta.get("consumer", "unknown"))
         except BudgetExceeded as exc:

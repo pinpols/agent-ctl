@@ -206,3 +206,66 @@ def test_store_failure_is_fail_open(tmp_path):
 
     resp = _gw(FakeProvider(["ok"]), BadStore()).invoke(REQ)
     assert resp.text == "fake-ok"  # 捕获写失败不影响主调用
+
+
+def test_local_rejection_does_not_pollute_circuit(tmp_path):
+    """P1-b:本地终态拒绝(input_audio/坏 tool_choice)不进 provider 路径、不计熔断。
+    此前 5 个带不支持块的请求即可把任意健康 provider 的熔断打开。"""
+    from agent_ctl.core.circuit import CircuitBreaker
+    from agent_ctl.errors import TerminalError
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    provider = FakeProvider(["ok"] * 10)
+    cb = CircuitBreaker(failure_threshold=5, cooldown_s=30.0)
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": provider},
+        cost_meter=CostMeter({"a": (5.0, 25.0)}),
+        store=store,
+        retry=RETRY,
+        circuit=cb,
+    )
+    bad = NormalizedRequest(
+        model="default",
+        messages=[
+            {"role": "user", "content": [{"type": "input_audio", "input_audio": {}}]}
+        ],
+        metadata={"consumer": "t"},
+    )
+    for _ in range(6):
+        with pytest.raises(TerminalError):
+            gw.invoke(bad)
+    assert cb.allow("fake") is True  # 熔断仍闭合
+    assert len(provider.calls) == 0  # 从未打到 provider
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "validation"
+    # 正常请求照常可用
+    assert gw.invoke(REQ).text == "fake-ok"
+
+
+def test_local_rejection_stream_does_not_pollute_circuit(tmp_path):
+    from agent_ctl.core.circuit import CircuitBreaker
+    from agent_ctl.errors import TerminalError
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    cb = CircuitBreaker(failure_threshold=5, cooldown_s=30.0)
+    gw = Gateway(
+        router=Router({"default": ["fake/a"]}),
+        providers={"fake": FakeProvider(["ok"] * 10)},
+        cost_meter=CostMeter({"a": (5.0, 25.0)}),
+        store=store,
+        retry=RETRY,
+        circuit=cb,
+    )
+    bad = NormalizedRequest(
+        model="default",
+        messages=[{"role": "user", "content": "hi"}],
+        tool_choice="weird",
+        metadata={"consumer": "t"},
+    )
+    for _ in range(6):
+        with pytest.raises(TerminalError):
+            list(gw.invoke_stream(bad))
+    assert cb.allow("fake") is True
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "validation"
