@@ -123,7 +123,9 @@ class _StreamMessages:
 def test_stream_parses_anthropic_events():
     client = type("C", (), {"messages": _StreamMessages()})()
     chunks = list(AnthropicProvider(client).stream(T, REQ, timeout=5.0))
-    assert [c.text for c in chunks if not c.done] == ["Hi ", "there"]
+    assert [c.text for c in chunks if not c.done and c.text] == ["Hi ", "there"]
+    # P1-4:message_start 即产出 input_tokens 计量块(非 done),abort 时可计成本
+    assert chunks[0].input_tokens == 9 and not chunks[0].done and not chunks[0].text
     done = chunks[-1]
     assert done.done and done.finish_reason == "end_turn"
     assert done.input_tokens == 9 and done.output_tokens == 6

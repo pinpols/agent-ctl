@@ -103,6 +103,10 @@ class AnthropicProvider:
             if etype == "message_start":
                 usage = getattr(getattr(ev, "message", None), "usage", None)
                 input_tokens = getattr(usage, "input_tokens", 0) or 0
+                if input_tokens:
+                    # 计量块(无文本、非 done):input_tokens 在 message_start 已知,
+                    # 立即上报给 StreamRunner,使 abort/中途错/deadline 截断可计成本。
+                    yield StreamChunk(input_tokens=input_tokens)
             elif etype == "content_block_start":
                 block = getattr(ev, "content_block", None)
                 if getattr(block, "type", None) == "tool_use":
@@ -130,6 +134,9 @@ class AnthropicProvider:
                 usage = getattr(ev, "usage", None)
                 if usage:
                     output_tokens = getattr(usage, "output_tokens", 0) or output_tokens
+                    yield StreamChunk(
+                        input_tokens=input_tokens, output_tokens=output_tokens
+                    )
         tool_calls = [
             {"id": f["id"], "name": f["name"], "arguments": f["args"]}
             for _, f in sorted(tool_frags.items())

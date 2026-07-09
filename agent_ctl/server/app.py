@@ -164,8 +164,16 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
     """把网关的 StreamChunk 流逐块编码为 OpenAI 兼容 SSE 帧(真·流式,逐块下发)。
 
     first 是 server 预拉的首块(用于把"开流前"错误降级为普通 HTTP 状态);其余从 gen
-    续取。中途异常会终止流(已发字节无法改 HTTP 状态)。
+    续取。中途异常会终止流(已发字节无法改 HTTP 状态)。客户端断开时 StreamingResponse
+    会 close 本生成器 → finally 显式关闭网关流(触发其 aborted 捕获与资源释放)。
     """
+    try:
+        yield from _sse_frames(first, gen, requested_model, created)
+    finally:
+        gen.close()
+
+
+def _sse_frames(first, gen, requested_model: str, created: int):
     import itertools
     import json as _json
 

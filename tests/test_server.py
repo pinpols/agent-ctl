@@ -899,3 +899,26 @@ def test_image_url_message_returns_400():
     )
     assert r.status_code == 400
     assert "image_url" in r.json()["error"]["message"]
+
+
+def test_sse_generator_close_closes_gateway_stream():
+    """P2-10:客户端断开(StreamingResponse close SSE 生成器)须连带关闭网关流。"""
+    from agent_ctl.server.app import _sse_from_chunks
+
+    closed = []
+
+    def gw_stream():
+        try:
+            yield StreamChunk(text="a")
+            yield StreamChunk(text="b")
+            yield StreamChunk(done=True, finish_reason="stop")
+        finally:
+            closed.append(True)
+
+    gen = gw_stream()
+    first = next(gen)
+    sse = _sse_from_chunks(first, gen, "m", created=1)
+    next(sse)  # role 帧
+    next(sse)  # 首块内容帧
+    sse.close()  # 模拟客户端断开
+    assert closed == [True]
