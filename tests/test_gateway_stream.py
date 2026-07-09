@@ -407,7 +407,9 @@ def test_stream_untyped_first_chunk_error_falls_back_with_record(tmp_path):
     bad = MeteredStreamProvider([], first_error=ConnectionResetError("reset by peer"))
     good = FakeStreamProvider(["ok"])
     cb = CircuitBreaker(failure_threshold=1, cooldown_s=30.0)
-    gw = _gw({"bad": bad, "good": good}, {"default": ["bad/m", "good/m"]}, store, circuit=cb)
+    gw = _gw(
+        {"bad": bad, "good": good}, {"default": ["bad/m", "good/m"]}, store, circuit=cb
+    )
     chunks = list(gw.invoke_stream(REQ))
     assert "".join(c.text for c in chunks if not c.done) == "ok"
     assert bad.calls == 1 and good.calls == 1

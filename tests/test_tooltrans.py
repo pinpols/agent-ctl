@@ -1,11 +1,18 @@
 from types import SimpleNamespace
 
+import pytest
+
+from agent_ctl.errors import TerminalError
 from agent_ctl.providers.tooltrans import (
     anthropic_messages_to_openai,
     anthropic_tool_choice_to_openai,
     anthropic_tools_to_openai,
     openai_message_to_anthropic_content,
+    openai_messages_to_anthropic,
     openai_response_to_anthropic_raw,
+    openai_tool_choice_to_anthropic,
+    openai_tools_to_anthropic,
+    stop_reason_to_finish,
 )
 
 
@@ -103,16 +110,6 @@ def test_openai_response_to_anthropic_raw_shape():
 
 
 # ── 深审 round4:openai→anthropic 请求方向 + stop_reason 反向映射 + 多模态显式拒绝 ──
-
-import pytest
-
-from agent_ctl.errors import TerminalError
-from agent_ctl.providers.tooltrans import (
-    openai_messages_to_anthropic,
-    openai_tool_choice_to_anthropic,
-    openai_tools_to_anthropic,
-    stop_reason_to_finish,
-)
 
 
 def test_openai_tools_to_anthropic():

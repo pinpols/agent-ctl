@@ -833,7 +833,9 @@ def test_openai_server_to_anthropic_backend_end_to_end():
 
     gw = Gateway(
         router=Router({"m": ["anthropic/claude-x"]}),
-        providers={"anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())},
+        providers={
+            "anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())
+        },
         cost_meter=CostMeter({}),
         store=None,
         retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=5.0),
@@ -876,7 +878,9 @@ def test_image_url_message_returns_400():
 
     gw = Gateway(
         router=Router({"m": ["anthropic/claude-x"]}),
-        providers={"anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())},
+        providers={
+            "anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())
+        },
         cost_meter=CostMeter({}),
         store=None,
         retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=5.0),
@@ -961,7 +965,9 @@ def test_xff_skips_trusted_intermediate_hops():
     hdr1 = {"X-Forwarded-For": "spoofed-a, 9.9.9.9, 10.0.0.5"}
     hdr2 = {"X-Forwarded-For": "spoofed-b, 9.9.9.9, 10.0.0.7"}
     assert c.get("/v1/models", headers=hdr1).status_code == 200
-    assert c.get("/v1/models", headers=hdr2).status_code == 429  # 同一真实客户端 9.9.9.9
+    assert (
+        c.get("/v1/models", headers=hdr2).status_code == 429
+    )  # 同一真实客户端 9.9.9.9
 
 
 def test_xff_all_hops_trusted_falls_back_to_socket_peer():
@@ -976,8 +982,12 @@ def test_xff_all_hops_trusted_falls_back_to_socket_peer():
         ),
         client=("127.0.0.1", 12345),
     )
-    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
-    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 429
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 429
+    )
 
 
 def test_default_max_tokens_configurable(monkeypatch):

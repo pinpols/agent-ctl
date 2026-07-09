@@ -191,8 +191,12 @@ def test_backfill_not_rerun_on_reopen(tmp_path, monkeypatch):
     with SqliteCaptureStore(path) as s:
         s.save(
             CallRecord(
-                id="err1", ts=1.0, consumer="t", status="error",
-                model_requested="m", model_resolved=None,
+                id="err1",
+                ts=1.0,
+                consumer="t",
+                status="error",
+                model_requested="m",
+                model_resolved=None,
             )
         )
     calls = []
@@ -216,8 +220,12 @@ def test_backfill_runs_for_legacy_db_then_marks(tmp_path):
         " cost_usd REAL, doc TEXT NOT NULL)"
     )
     doc = CallRecord(
-        id="old1", ts=1.0, consumer="t", status="success",
-        model_requested="fake/m", model_resolved="fake/m",
+        id="old1",
+        ts=1.0,
+        consumer="t",
+        status="success",
+        model_requested="fake/m",
+        model_resolved="fake/m",
     ).model_dump_json()
     conn.execute(
         "INSERT INTO call_record (id, ts, consumer, status, input_tokens,"
