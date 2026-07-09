@@ -10,6 +10,11 @@ from agent_ctl.models import (
     Target,
 )
 from agent_ctl.providers._http import classify_status, typed_error
+from agent_ctl.providers.tooltrans import (
+    openai_messages_to_anthropic,
+    openai_tool_choice_to_anthropic,
+    openai_tools_to_anthropic,
+)
 
 # 兼容旧 import 点(测试/外部)：classify_status 经本模块再导出。
 __all__ = ["AnthropicProvider", "classify_status"]
@@ -25,21 +30,24 @@ class AnthropicProvider:
     def _message_kwargs(
         self, target: Target, request: NormalizedRequest, timeout: float
     ) -> dict:
+        # OpenAI 形 server 进来的请求可能带 OpenAI 形 tools/tool_choice/messages
+        # (role:tool、assistant.tool_calls、str tool_choice)——在边界翻成 Anthropic 形;
+        # 已是 Anthropic 形(库形态消费者)则原样透传(翻译函数自带 passthrough)。
         kwargs = {
             "model": target.model,
-            "messages": request.messages,
+            "messages": openai_messages_to_anthropic(request.messages),
             "max_tokens": request.max_tokens,
             "timeout": timeout,  # anthropic SDK 支持 per-request 墙钟超时(httpx)
         }
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
         if request.tools:
-            kwargs["tools"] = request.tools
+            kwargs["tools"] = openai_tools_to_anthropic(request.tools)
         # system 提示 + 强制工具选择:工具调用型消费者依赖,缺省不传(向后兼容纯文本路由)。
         if request.system is not None:
             kwargs["system"] = request.system
         if request.tool_choice is not None:
-            kwargs["tool_choice"] = request.tool_choice
+            kwargs["tool_choice"] = openai_tool_choice_to_anthropic(request.tool_choice)
         return kwargs
 
     def invoke(

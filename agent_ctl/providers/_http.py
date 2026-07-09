@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from agent_ctl.errors import RetriableError, TerminalError
+from agent_ctl.errors import GatewayError, RetriableError, TerminalError
 
 
 def classify_status(status: int) -> str:
@@ -18,7 +18,10 @@ def classify_status(status: int) -> str:
 
 
 def typed_error(exc: Exception) -> Exception:
-    """SDK 异常 → 类型化网关错误。有状态码按 4xx/5xx 分类,无状态码(网络)按可重试。"""
+    """SDK 异常 → 类型化网关错误。有状态码按 4xx/5xx 分类,无状态码(网络)按可重试。
+    已是类型化网关错误(如 tooltrans 的 TerminalError)则原样透传,不得降级为可重试。"""
+    if isinstance(exc, GatewayError):
+        return exc
     status = getattr(exc, "status_code", None)
     if status is None:
         return RetriableError(str(exc))  # 网络/未知 → 可重试

@@ -19,6 +19,7 @@ from agent_ctl.errors import (
     TerminalError,
 )
 from agent_ctl.models import NormalizedRequest, NormalizedResponse
+from agent_ctl.providers.tooltrans import stop_reason_to_finish
 
 _DEFAULT_TRUSTED_PROXY_CIDRS = ("127.0.0.1/32", "::1/128")
 
@@ -131,7 +132,9 @@ def to_openai_response(
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": resp.finish_reason or "stop",
+                # Anthropic 后端透出的 stop_reason(end_turn/max_tokens/tool_use)
+                # 映射回 OpenAI finish_reason;已是 OpenAI 值则原样。
+                "finish_reason": stop_reason_to_finish(resp.finish_reason) or "stop",
             }
         ],
         "usage": {
@@ -185,7 +188,7 @@ def _sse_from_chunks(first, gen, requested_model: str, created: int):
         if chunk is None:
             continue
         if chunk.done:
-            final_fr = chunk.finish_reason or "stop"
+            final_fr = stop_reason_to_finish(chunk.finish_reason) or "stop"
             in_tok, out_tok = chunk.input_tokens, chunk.output_tokens
             if chunk.tool_calls:
                 # 工具调用合并为一帧下发(OpenAI 形;客户端可正常重组)

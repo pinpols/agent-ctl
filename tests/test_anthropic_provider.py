@@ -176,3 +176,60 @@ def test_status_503_raises_retriable_error():
     p = AnthropicProvider(_FakeClientStatus(503))
     with pytest.raises(RetriableError):
         p.invoke(T, REQ, timeout=5.0)
+
+
+# ── 深审 round4 P1-3:OpenAI 形请求在边界翻成 Anthropic 形 ──
+
+
+def test_invoke_translates_openai_shaped_tools_and_messages():
+    client = _FakeClient("ok")
+    req = NormalizedRequest(
+        model="default",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": '{"x":1}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "r"},
+        ],
+        max_tokens=64,
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "f", "parameters": {"type": "object"}},
+            }
+        ],
+        tool_choice="required",
+    )
+    AnthropicProvider(client).invoke(T, req, timeout=5.0)
+    kw = client.messages.last_kwargs
+    assert kw["tools"] == [
+        {"name": "f", "description": "", "input_schema": {"type": "object"}}
+    ]
+    assert kw["tool_choice"] == {"type": "any"}
+    assert kw["messages"][1]["content"][0]["type"] == "tool_use"
+    assert kw["messages"][2]["content"][0]["type"] == "tool_result"
+
+
+def test_invoke_anthropic_shaped_request_passes_through_unchanged():
+    client = _FakeClient("ok")
+    req = NormalizedRequest(
+        model="default",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        tools=[{"name": "report", "input_schema": {"type": "object"}}],
+        tool_choice={"type": "tool", "name": "report"},
+    )
+    AnthropicProvider(client).invoke(T, req, timeout=5.0)
+    kw = client.messages.last_kwargs
+    assert kw["tools"] == [{"name": "report", "input_schema": {"type": "object"}}]
+    assert kw["tool_choice"] == {"type": "tool", "name": "report"}
+    assert kw["messages"] == [{"role": "user", "content": "hi"}]

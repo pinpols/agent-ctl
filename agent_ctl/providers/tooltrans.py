@@ -15,6 +15,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent_ctl.errors import TerminalError
+
+# 多模态块类型:本网关不支持视觉/音频输入,遇到显式报终态错(→ HTTP 400),
+# 而非静默丢弃后让模型"看不见图"还装作正常回答。
+_UNSUPPORTED_BLOCK_TYPES = {"image", "image_url", "input_audio"}
+
+
+def _reject_multimodal(block_type: str | None) -> None:
+    if block_type in _UNSUPPORTED_BLOCK_TYPES:
+        raise TerminalError(
+            f"multimodal content block {block_type!r} is not supported by this gateway"
+        )
+
 
 def anthropic_tools_to_openai(tools: list | None) -> list | None:
     """Anthropic [{name, description, input_schema}] → OpenAI [{type:function, function:{...}}]。"""
@@ -129,6 +142,7 @@ def anthropic_messages_to_openai(messages: list[dict]) -> list[dict]:
             # user/tool:tool_result 拆成 role=tool 消息;其余文本并成 user 消息。
             text_parts = []
             for b in content:
+                _reject_multimodal(b.get("type"))
                 if b.get("type") == "tool_result":
                     tc = b.get("content")
                     out.append(
@@ -157,3 +171,118 @@ def openai_response_to_anthropic_raw(choice: Any, usage: Any) -> dict:
             "output_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
         },
     }
+
+
+# ── OpenAI 形 → Anthropic 形(HTTP server 收 OpenAI 请求、路由到 Anthropic 后端时用)──
+
+
+def openai_tools_to_anthropic(tools: list | None) -> list | None:
+    """OpenAI [{type:function, function:{name,description,parameters}}] →
+    Anthropic [{name, description, input_schema}]。已是 Anthropic 形则原样透传。"""
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        if isinstance(t, dict) and t.get("type") == "function" and "function" in t:
+            fn = t["function"] or {}
+            out.append(
+                {
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters")
+                    or {"type": "object", "properties": {}},
+                }
+            )
+        else:
+            out.append(t)
+    return out
+
+
+def openai_tool_choice_to_anthropic(tc: dict | str | None) -> dict | None:
+    """OpenAI tool_choice → Anthropic。"auto"→{type:auto};"required"→{type:any};
+    "none"→{type:none};{type:function,function:{name}}→{type:tool,name}。
+    已是 Anthropic 形 dict 则原样透传。"""
+    if tc is None:
+        return None
+    if isinstance(tc, str):
+        mapped = {"auto": "auto", "required": "any", "none": "none"}.get(tc)
+        if mapped is None:
+            raise TerminalError(f"unsupported tool_choice string: {tc!r}")
+        return {"type": mapped}
+    if tc.get("type") == "function":
+        return {"type": "tool", "name": (tc.get("function") or {}).get("name", "")}
+    return tc
+
+
+def openai_messages_to_anthropic(messages: list[dict]) -> list[dict]:
+    """OpenAI 形 messages → Anthropic 形(工具循环的请求方向翻译)。
+
+    - role=tool → user 消息里的 tool_result 块(连续多条 tool 合并为一条 user 消息,
+      满足 Anthropic 角色交替约束)。
+    - assistant.tool_calls → assistant content 的 tool_use 块(arguments JSON 解析为 input)。
+    - 其余消息原样透传;content 块里的图像/音频显式报错(见 _reject_multimodal)。
+    """
+    out: list[dict] = []
+    pending_tool_results: list[dict] = []
+
+    def flush_tool_results() -> None:
+        if pending_tool_results:
+            out.append({"role": "user", "content": list(pending_tool_results)})
+            pending_tool_results.clear()
+
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role == "tool":
+            pending_tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id", ""),
+                    "content": content
+                    if isinstance(content, str)
+                    else json.dumps(content, ensure_ascii=False),
+                }
+            )
+            continue
+        flush_tool_results()
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict):
+                    _reject_multimodal(b.get("type"))
+        if role == "assistant" and m.get("tool_calls"):
+            blocks: list[dict] = []
+            if isinstance(content, str) and content:
+                blocks.append({"type": "text", "text": content})
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") or {}
+                raw_args = fn.get("arguments", "")
+                try:
+                    args = json.loads(raw_args) if raw_args else {}
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args,
+                    }
+                )
+            out.append({"role": "assistant", "content": blocks})
+        else:
+            out.append(m)
+    flush_tool_results()
+    return out
+
+
+def stop_reason_to_finish(stop_reason: str | None) -> str | None:
+    """Anthropic stop_reason → OpenAI finish_reason(响应方向反向映射)。
+
+    end_turn/stop_sequence→stop、max_tokens→length、tool_use→tool_calls;
+    已是 OpenAI 值(或未知)则原样透传。"""
+    return {
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+        "max_tokens": "length",
+        "tool_use": "tool_calls",
+    }.get(stop_reason or "", stop_reason)

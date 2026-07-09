@@ -737,3 +737,165 @@ def test_direct_model_allowed_by_default():
         json={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "x"}]},
     )
     assert r.status_code == 200
+
+
+# ── 深审 round4 ────────────────────────────────────────────
+
+
+def test_str_tool_choice_passes_end_to_end():
+    """P1-1:"auto"/"required"/"none" 是合法 OpenAI tool_choice,须穿过 server→gateway。"""
+    gw = FakeGateway(resp=NormalizedResponse(text="ok"))
+    c = _client(gw)
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "tool_choice": "required",
+        },
+    )
+    assert r.status_code == 200
+    assert gw.last_request.tool_choice == "required"
+
+
+def test_anthropic_stop_reason_mapped_to_finish_reason():
+    """P1-3:Anthropic 后端透出的 stop_reason 须映射回 OpenAI finish_reason。"""
+    for stop_reason, expected in [
+        ("end_turn", "stop"),
+        ("max_tokens", "length"),
+        ("tool_use", "tool_calls"),
+    ]:
+        gw = FakeGateway(resp=NormalizedResponse(text="t", finish_reason=stop_reason))
+        r = _client(gw).post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.json()["choices"][0]["finish_reason"] == expected
+
+
+def test_stream_anthropic_stop_reason_mapped():
+    import json as _json
+
+    gw = FakeGateway(
+        resp=NormalizedResponse(text="hi", finish_reason="end_turn"),
+        stream_chunks=["hi"],
+    )
+    r = _client(gw).post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    frames = [
+        _json.loads(line[len("data: ") :])
+        for line in r.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    finishes = [
+        f["choices"][0]["finish_reason"]
+        for f in frames
+        if f.get("choices") and f["choices"][0]["finish_reason"]
+    ]
+    assert finishes == ["stop"]  # end_turn → stop
+
+
+def test_openai_server_to_anthropic_backend_end_to_end():
+    """P1-3 端到端:OpenAI 形请求穿 server → Gateway → AnthropicProvider(fake client),
+    工具/消息在边界翻成 Anthropic 形,anthropic 形响应翻回 OpenAI 形。"""
+    from agent_ctl.config import RetryConfig
+    from agent_ctl.core.cost import CostMeter
+    from agent_ctl.core.gateway import Gateway
+    from agent_ctl.core.router import Router
+    from agent_ctl.providers.anthropic_provider import AnthropicProvider
+
+    captured = {}
+
+    class _Msg:
+        content = [
+            type("B", (), {"type": "tool_use", "id": "t1", "name": "f", "input": {}})()
+        ]
+        stop_reason = "tool_use"
+        usage = type("U", (), {"input_tokens": 7, "output_tokens": 3})()
+
+        def model_dump(self, mode="python"):
+            return {
+                "content": [{"type": "tool_use", "id": "t1", "name": "f", "input": {}}],
+                "stop_reason": "tool_use",
+            }
+
+    class _Messages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _Msg()
+
+    gw = Gateway(
+        router=Router({"m": ["anthropic/claude-x"]}),
+        providers={"anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())},
+        cost_meter=CostMeter({}),
+        store=None,
+        retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=5.0),
+    )
+    c = TestClient(build_server(gw, now=lambda: 1))
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "tool_choice": "auto",
+        },
+    )
+    assert r.status_code == 200
+    # 请求方向:OpenAI 形 → Anthropic 形
+    assert captured["tools"][0] == {
+        "name": "f",
+        "description": "",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+    assert captured["tool_choice"] == {"type": "auto"}
+    # 响应方向:stop_reason=tool_use → finish_reason=tool_calls,tool_use 块 → tool_calls
+    body = r.json()
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+    assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "f"
+
+
+def test_image_url_message_returns_400():
+    """P2-9 端到端:视觉输入不支持 → 显式 400,而非静默丢图。"""
+    from agent_ctl.config import RetryConfig
+    from agent_ctl.core.cost import CostMeter
+    from agent_ctl.core.gateway import Gateway
+    from agent_ctl.core.router import Router
+    from agent_ctl.providers.anthropic_provider import AnthropicProvider
+
+    class _Messages:
+        def create(self, **kwargs):
+            raise AssertionError("不应打到 provider")
+
+    gw = Gateway(
+        router=Router({"m": ["anthropic/claude-x"]}),
+        providers={"anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())},
+        cost_meter=CostMeter({}),
+        store=None,
+        retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=5.0),
+    )
+    c = TestClient(build_server(gw, now=lambda: 1))
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "看图"},
+                        {"type": "image_url", "image_url": {"url": "https://x/1.png"}},
+                    ],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 400
+    assert "image_url" in r.json()["error"]["message"]
