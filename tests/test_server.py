@@ -922,3 +922,59 @@ def test_sse_generator_close_closes_gateway_stream():
     next(sse)  # 首块内容帧
     sse.close()  # 模拟客户端断开
     assert closed == [True]
+
+
+def test_xff_leftmost_spoof_cannot_evade_rate_limit():
+    """P1-5:XFF 最左值客户端可伪造;须从右往左取第一个不在可信 CIDR 的地址。
+    攻击者每次换最左伪造值,真实客户端(右侧)不变 → 仍应命中同一限流桶。"""
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            rate_limit_per_minute=1,
+            trust_proxy_headers=True,
+        ),
+        client=("127.0.0.1", 12345),
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "1.1.1.1, 9.9.9.9"}).status_code
+        == 200
+    )
+    assert (
+        c.get("/v1/models", headers={"X-Forwarded-For": "2.2.2.2, 9.9.9.9"}).status_code
+        == 429
+    )
+
+
+def test_xff_skips_trusted_intermediate_hops():
+    """多跳:右起跳过可信反代地址,取第一个不可信地址作为真实客户端。"""
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            rate_limit_per_minute=1,
+            trust_proxy_headers=True,
+            trusted_proxy_cidrs=["127.0.0.1/32", "10.0.0.0/8"],
+        ),
+        client=("127.0.0.1", 12345),
+    )
+    hdr1 = {"X-Forwarded-For": "spoofed-a, 9.9.9.9, 10.0.0.5"}
+    hdr2 = {"X-Forwarded-For": "spoofed-b, 9.9.9.9, 10.0.0.7"}
+    assert c.get("/v1/models", headers=hdr1).status_code == 200
+    assert c.get("/v1/models", headers=hdr2).status_code == 429  # 同一真实客户端 9.9.9.9
+
+
+def test_xff_all_hops_trusted_falls_back_to_socket_peer():
+    """整条链全是可信地址(内网直连)→ 回退用 socket 对端,不因空选择而崩。"""
+    c = TestClient(
+        build_server(
+            FakeGateway(resp=NormalizedResponse(text="")),
+            now=lambda: 1234,
+            rate_limit_per_minute=1,
+            trust_proxy_headers=True,
+            trusted_proxy_cidrs=["127.0.0.1/32", "10.0.0.0/8"],
+        ),
+        client=("127.0.0.1", 12345),
+    )
+    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
+    assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 429

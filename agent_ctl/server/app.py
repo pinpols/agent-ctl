@@ -561,13 +561,30 @@ def _rate_limit_key(
     trust_proxy_headers: bool,
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
 ) -> str:
+    """限流键 = 真实客户端标识。
+
+    XFF 最左值是客户端可任意伪造的(攻击者每请求换一个即绕过限流);可信的是
+    **可信反代自己追加的右端条目**。因此从右往左跳过可信 CIDR 内的地址,取第一个
+    不可信地址作为真实客户端;整条链全可信(内网直连)则回退 socket 对端。"""
     if trust_proxy_headers and _client_is_trusted_proxy(
         request, trusted_proxy_networks
     ):
-        forwarded_for = request.headers.get("x-forwarded-for")
-        if forwarded_for:
-            return f"xff:{forwarded_for.split(',', 1)[0].strip()}"
+        forwarded_for = request.headers.get("x-forwarded-for") or ""
+        hops = [h.strip() for h in forwarded_for.split(",") if h.strip()]
+        for hop in reversed(hops):
+            if not _ip_in_networks(hop, trusted_proxy_networks):
+                return f"xff:{hop}"
     return request.client.host if request.client else "unknown"
+
+
+def _ip_in_networks(
+    value: str, networks: tuple[IPv4Network | IPv6Network, ...]
+) -> bool:
+    try:
+        addr = ip_address(value)
+    except ValueError:
+        return False  # 非法地址不可能是我们的可信反代 → 视为不可信(即真实客户端键)
+    return any(addr in network for network in networks)
 
 
 def _client_is_trusted_proxy(
