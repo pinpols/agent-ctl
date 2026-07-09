@@ -978,3 +978,19 @@ def test_xff_all_hops_trusted_falls_back_to_socket_peer():
     )
     assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.1"}).status_code == 200
     assert c.get("/v1/models", headers={"X-Forwarded-For": "10.0.0.2"}).status_code == 429
+
+
+def test_default_max_tokens_configurable(monkeypatch):
+    """P2-8:强加的 max_tokens=1024 默认可经参数/环境变量配置;显式请求值仍优先。"""
+    gw = FakeGateway(resp=NormalizedResponse(text=""))
+    c = TestClient(build_server(gw, now=lambda: 1, default_max_tokens=4096))
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    c.post("/v1/chat/completions", json=body)
+    assert gw.last_request.max_tokens == 4096
+    c.post("/v1/chat/completions", json={**body, "max_tokens": 7})
+    assert gw.last_request.max_tokens == 7  # 显式值优先
+
+    monkeypatch.setenv("AGENT_CTL_DEFAULT_MAX_TOKENS", "2048")
+    c2 = TestClient(build_server(gw, now=lambda: 1))  # 未传参 → 读环境变量
+    c2.post("/v1/chat/completions", json=body)
+    assert gw.last_request.max_tokens == 2048

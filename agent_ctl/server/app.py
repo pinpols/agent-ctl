@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -35,7 +36,7 @@ def _consumer_of(body: dict) -> str:
     return "openai-compat-server"
 
 
-def to_normalized(body: dict) -> NormalizedRequest:
+def to_normalized(body: dict, default_max_tokens: int = 1024) -> NormalizedRequest:
     """OpenAI /v1/chat/completions 请求体 → NormalizedRequest。
 
     OpenAI 允许多条 role=system;全部抽出按序合并到 NormalizedRequest.system
@@ -56,7 +57,7 @@ def to_normalized(body: dict) -> NormalizedRequest:
         else:
             rest.append(m)
     system = "\n\n".join(system_parts) if system_parts else None
-    max_tokens = body["max_tokens"] if "max_tokens" in body else 1024
+    max_tokens = body["max_tokens"] if "max_tokens" in body else default_max_tokens
     try:
         if isinstance(max_tokens, bool):
             raise ValueError
@@ -308,15 +309,23 @@ def build_server(
     trust_proxy_headers: bool = False,
     trusted_proxy_cidrs: list[str] | None = None,
     allow_direct_models: bool = True,
+    default_max_tokens: int | None = None,
 ):
     """构造 OpenAI 兼容网关 FastAPI app。
 
     gateway: 已装配的 Gateway(注入,便于测试)。
     models: /v1/models 列出的模型名(可选)。
     now: 可注入的时间戳函数(测试用),默认 time.time。
+    default_max_tokens: 请求未带 max_tokens 时的默认值;None 时读环境变量
+        AGENT_CTL_DEFAULT_MAX_TOKENS,再缺省 1024(Anthropic 后端必填该字段,
+        不能不设;但 1024 对长回答太小,故开放配置)。
     """
     from fastapi import FastAPI
 
+    if default_max_tokens is None:
+        default_max_tokens = int(os.getenv("AGENT_CTL_DEFAULT_MAX_TOKENS", "1024"))
+    if default_max_tokens <= 0:
+        raise ValueError("default_max_tokens must be a positive integer")
     clock = now or (lambda: int(time.time()))
     app = FastAPI(title="agent-ctl OpenAI-compatible gateway")
     listed = list(models or [])
@@ -435,7 +444,7 @@ def build_server(
         if blocked is not None:
             return blocked
         try:
-            req = to_normalized(body)
+            req = to_normalized(body, default_max_tokens)
         except ValueError as exc:
             return JSONResponse(
                 status_code=400,

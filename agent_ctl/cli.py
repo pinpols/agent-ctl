@@ -204,6 +204,7 @@ def _cmd_serve(cfg, args) -> int:
         trust_proxy_headers=args.trust_proxy_headers,
         trusted_proxy_cidrs=args.trusted_proxy_cidr,
         allow_direct_models=cfg.allow_direct_models,
+        default_max_tokens=args.default_max_tokens,
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
@@ -316,6 +317,12 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--metrics-token", default=None)
     p_serve.add_argument("--max-request-bytes", type=int, default=1_000_000)
     p_serve.add_argument("--rate-limit-per-minute", type=int, default=120)
+    p_serve.add_argument(
+        "--default-max-tokens",
+        type=int,
+        default=None,
+        help="请求未带 max_tokens 时的默认值;缺省读 AGENT_CTL_DEFAULT_MAX_TOKENS,再缺省 1024",
+    )
     p_serve.add_argument("--trust-proxy-headers", action="store_true")
     p_serve.add_argument(
         "--trusted-proxy-cidr",
