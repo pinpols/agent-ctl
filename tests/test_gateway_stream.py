@@ -481,3 +481,63 @@ def test_stream_deadline_truncation_closes_provider_gen(tmp_path):
     rec = store.list_recent(1)[0]
     assert rec.status == "deadline"
     assert rec.input_tokens == 1000 and rec.cost_usd > 0  # P1-4:截断也计成本
+
+
+# ── 深审 round2(P1-a):计量块不吃回退窗口 ──────────────────────────────
+
+
+def test_stream_error_after_metering_before_text_falls_back(tmp_path):
+    """P1-a:Anthropic 在 message_start 即产计量块 → first=next(gen) 成功,此后
+    SSE 错误落中流处理。但此时未向客户端发过任何内容字节,回退是安全的——
+    应按 retriable 回退到下一目标(计熔断+记 attempt),而非 GatewayError→400。"""
+    import httpx
+
+    class MeterThenBoom:
+        def __init__(self):
+            self.calls = 0
+            self.closed = False
+
+        def invoke(self, *a):
+            raise NotImplementedError
+
+        def stream(self, target, request, timeout):
+            self.calls += 1
+            try:
+                yield StreamChunk(input_tokens=777)  # 计量块(非内容)
+                raise httpx.ReadError("connection lost mid-handshake")
+            finally:
+                self.closed = True
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    bad = MeterThenBoom()
+    good = FakeStreamProvider(["ok"])
+    cb = CircuitBreaker(failure_threshold=1, cooldown_s=30.0)
+    gw = _gw(
+        {"bad": bad, "good": good}, {"default": ["bad/m", "good/m"]}, store, circuit=cb
+    )
+    chunks = list(gw.invoke_stream(REQ))
+    assert "".join(c.text for c in chunks if not c.done) == "ok"  # 回退成功
+    assert bad.calls == 1 and good.calls == 1
+    assert bad.closed is True  # 回退前显式关闭失败目标的流
+    rec = store.list_recent(1)[0]
+    assert rec.status == "fallback_success"
+    assert rec.attempts[0].outcome == "retriable"
+    assert "connection lost" in (rec.attempts[0].error or "")
+    assert cb.allow("bad") is False  # 熔断有记账
+
+
+def test_stream_error_after_content_still_no_fallback(tmp_path):
+    """对照:已向客户端发过内容字节后中途错,维持不回退语义(错误记录+抛)。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    mid = MeteredStreamProvider(["a", "b"], it=10, mid_error=RetriableError("drop"))
+    other = FakeStreamProvider(["x"])
+    gw = _gw({"mid": mid, "other": other}, {"default": ["mid/m", "other/m"]}, store)
+    collected = []
+    with pytest.raises(GatewayError):
+        for c in gw.invoke_stream(REQ):
+            if not c.done:
+                collected.append(c.text)
+    assert collected == ["a"]
+    assert other.calls == 0  # 已发内容 → 不回退
+    rec = store.list_recent(1)[0]
+    assert rec.error_type == "stream"
