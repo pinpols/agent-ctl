@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 log = logging.getLogger("agent_ctl.metrics")
 
@@ -101,12 +102,17 @@ class MetricsRegistry:
 
     _instance: Metrics | None = None
     _resolved = False
+    _lock = threading.Lock()
 
     @classmethod
     def get(cls) -> Metrics | None:
+        # 双检加锁 + 赋值顺序(先 _instance 后 _resolved):原实现先置 _resolved=True
+        # 再构造 Metrics,并发下另一线程会在窗口内拿到 None → 该请求的指标静默丢失。
         if not cls._resolved:
-            cls._resolved = True
-            cls._instance = Metrics() if _prometheus_available() else None
+            with cls._lock:
+                if not cls._resolved:
+                    cls._instance = Metrics() if _prometheus_available() else None
+                    cls._resolved = True
         return cls._instance
 
 

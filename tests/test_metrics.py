@@ -71,3 +71,28 @@ def test_metrics_export_format():
     text = metrics.export_text()
     assert isinstance(text, str)
     assert "agentctl_requests_total" in text
+
+
+def test_metrics_registry_singleton_concurrent_get(monkeypatch):
+    """P2-f:并发首次 get() 不得出现 None 窗口——所有线程拿到同一个非 None 实例
+    (prometheus 已装的测试环境)。"""
+    import threading
+
+    from agent_ctl.obs.metrics import MetricsRegistry
+
+    monkeypatch.setattr(MetricsRegistry, "_instance", None)
+    monkeypatch.setattr(MetricsRegistry, "_resolved", False)
+    results = []
+    barrier = threading.Barrier(16)
+
+    def worker():
+        barrier.wait()
+        results.append(MetricsRegistry.get())
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert all(r is not None for r in results)
+    assert len({id(r) for r in results}) == 1  # 同一个单例
