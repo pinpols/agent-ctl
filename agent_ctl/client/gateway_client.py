@@ -88,7 +88,8 @@ class GatewayClient:
         temperature: float | None = None,
         tools: list | None = None,
         system: str | None = None,
-        tool_choice: dict | None = None,
+        # dict=Anthropic 形({type:tool,name}/{type:any});str=OpenAI 形(auto/required/none)
+        tool_choice: dict | str | None = None,
         **metadata,
     ) -> NormalizedResponse:
         request = NormalizedRequest(

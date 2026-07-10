@@ -348,3 +348,17 @@ def test_cli_fails_friendly_on_unknown_config_key(tmp_path, capsys):
     assert main(["--config", str(cfg), "doctor"]) == 1
     out = capsys.readouterr().out
     assert "FAIL" in out and "routez" in out
+
+
+def test_parse_since_friendly_error():
+    """P3:非法 --since 给友好 FAIL,而非裸 ValueError traceback。"""
+    import pytest
+
+    from agent_ctl.cli import _parse_since
+
+    with pytest.raises(SystemExit, match="since"):
+        _parse_since("yesterday")
+    with pytest.raises(SystemExit, match="since"):
+        _parse_since("xxh")
+    assert _parse_since(None) is None
+    assert _parse_since("0") == 0.0

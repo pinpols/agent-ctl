@@ -218,11 +218,17 @@ def _cmd_version(cfg, args) -> int:
 def _parse_since(value: str | None) -> float | None:
     if value is None:
         return None
-    if value.endswith("h"):
-        return time.time() - float(value[:-1]) * 3600
-    if value.endswith("d"):
-        return time.time() - float(value[:-1]) * 86400
-    return float(value)
+    try:
+        if value.endswith("h"):
+            return time.time() - float(value[:-1]) * 3600
+        if value.endswith("d"):
+            return time.time() - float(value[:-1]) * 86400
+        return float(value)
+    except ValueError:
+        # 友好报错而非裸 ValueError traceback
+        raise SystemExit(
+            f"FAIL: 非法 --since 值 {value!r}(期望 Unix 时间戳、Nh 或 Nd,如 24h / 7d)"
+        ) from None
 
 
 def _price_exists(cfg, target: Target) -> bool:
@@ -328,7 +334,9 @@ def main(argv: list[str] | None = None) -> int:
         "--trusted-proxy-cidr",
         action="append",
         default=None,
-        help="可信反代来源 CIDR;可重复。设置后仅这些来源的 X-Forwarded-For 会被信任",
+        help="可信反代来源 CIDR;可重复。设置后仅这些来源的 X-Forwarded-For 会被信任。"
+        "只配真实反代 IP(如 10.0.0.5/32),勿配客户端所在整段:覆盖过宽会使整条 "
+        "XFF 链全可信 → 回退 socket 对端,全部客户端共享同一个限流桶",
     )
     args = parser.parse_args(argv)
     if args.command in {"version", "config-schema"}:

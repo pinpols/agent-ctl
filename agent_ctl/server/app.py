@@ -580,7 +580,11 @@ def _rate_limit_key(
 
     XFF 最左值是客户端可任意伪造的(攻击者每请求换一个即绕过限流);可信的是
     **可信反代自己追加的右端条目**。因此从右往左跳过可信 CIDR 内的地址,取第一个
-    不可信地址作为真实客户端;整条链全可信(内网直连)则回退 socket 对端。"""
+    不可信地址作为真实客户端;整条链全可信(内网直连)则回退 socket 对端。
+
+    运维注意(见 README Production Notes):trusted CIDR 只应配真实反代来源 IP。
+    覆盖过宽(如客户端也落在其中)会让整条链全可信 → 一律回退 socket 对端 =
+    该反代后的所有客户端共享同一个限流桶,单个吵闹客户端即可耗尽全体配额。"""
     if trust_proxy_headers and _client_is_trusted_proxy(
         request, trusted_proxy_networks
     ):
