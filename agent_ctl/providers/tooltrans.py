@@ -351,14 +351,14 @@ def openai_messages_to_anthropic(messages: list[dict]) -> list[dict]:
         if role == "user" and pending_tool_results:
             # 紧随 tool_result 的 user 内容并入同一条 user 消息(tool_result 块在前):
             # 否则产出连续两条 user,违反 Anthropic 角色交替约束被 400。
-            blocks = list(pending_tool_results)
+            merged: list[dict] = list(pending_tool_results)
             pending_tool_results.clear()
             if isinstance(content, str):
                 if content:
-                    blocks.append({"type": "text", "text": content})
+                    merged.append({"type": "text", "text": content})
             elif isinstance(content, list):
-                blocks.extend(content)
-            out.append({"role": "user", "content": blocks})
+                merged.extend(content)
+            out.append({"role": "user", "content": merged})
             continue
         flush_tool_results()
         if role == "assistant" and m.get("tool_calls"):
