@@ -244,3 +244,59 @@ def test_backfill_runs_for_legacy_db_then_marks(tmp_path):
             "SELECT 1 FROM schema_migrations WHERE version = 2"
         ).fetchone()
         assert marked is not None
+
+
+# ── 深审 round2(P2-c):双进程并发 schema 升级容错 ──────────────────────────
+
+
+def test_concurrent_upgrade_duplicate_column_tolerated(tmp_path):
+    """模拟第二进程场景:本进程读到"列缺失"后、ALTER 前,另一进程已把列加上
+    (旧库 → 双方同时升级)。后到的 ALTER 得 duplicate column,应视为已升级继续。"""
+    import sqlite3 as _sq
+
+    db = str(tmp_path / "legacy.db")
+    conn = _sq.connect(db)
+    conn.execute(
+        "CREATE TABLE call_record ("
+        " id TEXT PRIMARY KEY, ts REAL, consumer TEXT, status TEXT,"
+        " input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL,"
+        " doc TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    class RacingStore(SqliteCaptureStore):
+        def _add_column(self, name):
+            # 抢在本进程 ALTER 之前,"另一进程"先把列加好 → 触发 duplicate column
+            other = _sq.connect(self._path)
+            other.execute(f"ALTER TABLE call_record ADD COLUMN {name} TEXT")
+            other.commit()
+            other.close()
+            super()._add_column(name)
+
+    store = RacingStore(db)  # 不抛 → 升级容错生效
+    cols = {
+        r["name"]
+        for r in store._conn.execute("PRAGMA table_info(call_record)").fetchall()
+    }
+    assert {"model_requested", "model_resolved"} <= cols
+    store.save(_rec("r1", 0.1))  # 升级后的库照常可写
+    assert store.list_recent(1)[0].id == "r1"
+    store.close()
+
+
+def test_other_operational_errors_still_raise(tmp_path):
+    """duplicate column 之外的 OperationalError 不得被吞。"""
+    import pytest as _pytest
+    import sqlite3 as _sq
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    with _pytest.raises(_sq.OperationalError):
+        store._add_column("doc)")  # 非法列名 → syntax error 照常抛
+    store.close()
+
+
+def test_busy_timeout_configured(tmp_path):
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    store.close()

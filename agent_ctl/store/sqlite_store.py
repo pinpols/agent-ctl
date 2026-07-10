@@ -27,6 +27,9 @@ class SqliteCaptureStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # 显式 busy_timeout:多进程同时打开同一 db(如 CLI 与 server 并存)时,
+        # schema 升级/写入遇锁等待而非立刻 'database is locked'。
+        self._conn.execute("PRAGMA busy_timeout=5000")
         if db_path != ":memory:":
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
@@ -73,7 +76,7 @@ class SqliteCaptureStore:
         }
         for name in ("model_requested", "model_resolved"):
             if name not in existing:
-                self._conn.execute(f"ALTER TABLE call_record ADD COLUMN {name} TEXT")
+                self._add_column(name)
         # 回填只跑一次:error 记录的 model_resolved 合法为 NULL,按 "IS NULL" 判断
         # 会让每次启动都全量重扫重写这批行。回填完成即打 v2 标记,后续启动跳过。
         marked = self._conn.execute(
@@ -86,6 +89,16 @@ class SqliteCaptureStore:
                 "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
                 (_BACKFILL_MARKER_VERSION,),
             )
+
+    def _add_column(self, name: str) -> None:
+        """ALTER ADD COLUMN 容忍并发升级:两个进程同时打开旧库,双方都看到列缺失、
+        都发 ALTER,后到者得 'duplicate column'——这等价于"已被别人升级完",
+        吞掉继续;其他 OperationalError 照常抛。"""
+        try:
+            self._conn.execute(f"ALTER TABLE call_record ADD COLUMN {name} TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     def _backfill_model_columns(self) -> None:
         rows = self._conn.execute(
