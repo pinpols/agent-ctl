@@ -171,7 +171,9 @@ class StreamRunner:
                         "deadline",
                         "deadline",
                     )
-                    gen.close()  # 显式关闭 provider 流,不留半开连接
+                    # 显式关闭 provider 流,不留半开连接;close 异常只记日志——
+                    # 若任其抛出会落回下方 stream_error 捕获 → deadline 路径双记账。
+                    self._close_quietly(gen)
                     yield StreamChunk(
                         done=True,
                         finish_reason="length",
@@ -218,6 +220,7 @@ class StreamRunner:
                 "stream",
                 error_message=str(exc),
             )
+            self._close_quietly(gen)  # 中途错也不留半开 provider 流
             raise GatewayError(str(exc)) from exc
         except BaseException:
             ctx.attempts.append(
@@ -235,6 +238,7 @@ class StreamRunner:
                 "aborted",
                 "client_abort",
             )
+            self._close_quietly(gen)  # 客户端断流:显式关闭而非等 GC
             raise
         h._circuit.record_success(target.provider)
         ctx.attempts.append(h._attempt(target, "success", t0, None))

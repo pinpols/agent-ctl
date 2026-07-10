@@ -541,3 +541,62 @@ def test_stream_error_after_content_still_no_fallback(tmp_path):
     assert other.calls == 0  # 已发内容 → 不回退
     rec = store.list_recent(1)[0]
     assert rec.error_type == "stream"
+
+
+# ── 深审 round2(P2-e / P3):gen.close 卫生——close 异常不得二次记账 ──────────
+
+
+def test_deadline_close_failure_single_record(tmp_path):
+    """P2-e:deadline 截断路径里 provider 流 close() 抛异常,不得落第二条记录
+    (原 close 在 try 内,异常会再走 stream_error 捕获 → 双记账 + 吞掉收尾 done)。"""
+    import time as _t
+
+    class ExplodingClose:
+        """close 时炸的 provider 流(手写迭代器,close 可控)。"""
+
+        def __init__(self):
+            self.i = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.i += 1
+            _t.sleep(0.03)
+            return StreamChunk(text=str(self.i))
+
+        def close(self):
+            raise RuntimeError("close boom")
+
+    class P:
+        def invoke(self, *a):
+            raise NotImplementedError
+
+        def stream(self, target, request, timeout):
+            return ExplodingClose()
+
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    gw = Gateway(
+        router=Router({"default": ["s/m"]}),
+        providers={"s": P()},
+        cost_meter=CostMeter({}),
+        store=store,
+        retry=RetryConfig(max_attempts_per_target=1, timeout_s=60.0),
+        request_deadline_s=0.05,
+    )
+    chunks = list(gw.invoke_stream(REQ))  # 不抛:close 失败被吞
+    assert chunks[-1].done  # 收尾 done 仍发出
+    recs = store.list_recent(10)
+    assert len(recs) == 1  # 只有一条记录
+    assert recs[0].status == "deadline"
+
+
+def test_client_abort_closes_provider_stream(tmp_path):
+    """P3:客户端断流(GeneratorExit)路径显式关闭 provider 流。"""
+    store = SqliteCaptureStore(str(tmp_path / "c.db"))
+    p = MeteredStreamProvider(["a", "b", "c"])
+    gw = _gw({"s": p}, {"default": ["s/m"]}, store)
+    gen = gw.invoke_stream(REQ)
+    assert next(gen).text == "a"
+    gen.close()
+    assert p.closed is True
