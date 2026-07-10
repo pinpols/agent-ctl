@@ -67,3 +67,33 @@ def test_retry_config_rejects_invalid_values():
 def test_config_rejects_negative_production_knobs(kwargs):
     with pytest.raises(ValidationError):
         Config(**kwargs)
+
+
+# ── 深审 round2(P2-b):未知键 fail-fast ──────────────────────────────────
+
+
+def test_unknown_top_level_key_fails_fast(tmp_path):
+    cfg_file = tmp_path / "agent_ctl.yaml"
+    cfg_file.write_text("routez:\n  default: [anthropic/x]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="routez"):
+        load_config(str(cfg_file))
+
+
+def test_unknown_nested_retry_key_fails_fast(tmp_path):
+    cfg_file = tmp_path / "agent_ctl.yaml"
+    cfg_file.write_text("retry:\n  max_attempt_per_target: 3\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="max_attempt_per_target"):
+        load_config(str(cfg_file))
+
+
+def test_config_model_rejects_extra_kwargs():
+    with pytest.raises(ValidationError):
+        Config(no_such_key=1)
+
+
+def test_non_extra_validation_error_still_raises_validation_error(tmp_path):
+    """非未知键的校验错误保持原样(ValidationError),不被误包装。"""
+    cfg_file = tmp_path / "agent_ctl.yaml"
+    cfg_file.write_text("cache_ttl_s: -1\n", encoding="utf-8")
+    with pytest.raises(ValidationError):
+        load_config(str(cfg_file))

@@ -337,3 +337,14 @@ def test_serve_models_include_routes_and_aliases(tmp_path, monkeypatch):
     assert main(["serve"]) == 0
     ids = {m["id"] for m in seen["models"]["data"]}
     assert ids == {"default", "alias-a"}
+
+
+def test_cli_fails_friendly_on_unknown_config_key(tmp_path, capsys):
+    """P2-b:doctor 等命令对拼错的配置键给 FAIL 提示 + 退出码 1,非裸 traceback。"""
+    from agent_ctl.cli import main
+
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("routez:\n  default: [anthropic/x]\n", encoding="utf-8")
+    assert main(["--config", str(cfg), "doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "routez" in out

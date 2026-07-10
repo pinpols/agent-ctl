@@ -331,9 +331,13 @@ def main(argv: list[str] | None = None) -> int:
         help="可信反代来源 CIDR;可重复。设置后仅这些来源的 X-Forwarded-For 会被信任",
     )
     args = parser.parse_args(argv)
-    cfg = (
-        None
-        if args.command in {"version", "config-schema"}
-        else load_config(args.config)
-    )
+    if args.command in {"version", "config-schema"}:
+        cfg = None
+    else:
+        try:
+            cfg = load_config(args.config)
+        except ValueError as exc:
+            # 未知键等配置错误:统一友好 FAIL(doctor 等所有命令),不吐裸 traceback
+            print(f"FAIL: {exc}")
+            return 1
     return _COMMANDS[args.command](cfg, args)
