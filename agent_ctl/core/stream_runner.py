@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import time
 from collections.abc import Generator, Iterator
 
@@ -16,6 +17,9 @@ from agent_ctl.errors import (
 )
 from agent_ctl.models import NormalizedRequest, NormalizedResponse, StreamChunk
 from agent_ctl.providers.base import StreamingProvider
+from agent_ctl.providers.tooltrans import validate_local_content
+
+log = logging.getLogger("agent_ctl.stream")
 
 
 class StreamRunner:
@@ -34,6 +38,12 @@ class StreamRunner:
         started = time.monotonic()
         meta = request.metadata or {}
         ctx = CallCtx(request=request, meta=meta, started=started, deadline=None)
+        try:
+            # 本地终态校验前置:不进 provider 路径,不污染熔断(与 Gateway.invoke 对称)
+            validate_local_content(request.messages, request.tool_choice)
+        except TerminalError as exc:
+            self._error(ctx, "validation", str(exc))
+            raise
         try:
             h._budget.check(meta.get("consumer", "unknown"))
         except BudgetExceeded as exc:
@@ -137,6 +147,7 @@ class StreamRunner:
         fr: str | None = None
         it = ot = 0
         tcs: list | None = None
+        emitted_content = False  # 是否已向客户端发过内容块(计量块不算)
         try:
             for chunk in itertools.chain([] if first is None else [first], gen):
                 if ctx.deadline is not None and time.monotonic() >= ctx.deadline:
@@ -160,7 +171,9 @@ class StreamRunner:
                         "deadline",
                         "deadline",
                     )
-                    gen.close()  # 显式关闭 provider 流,不留半开连接
+                    # 显式关闭 provider 流,不留半开连接;close 异常只记日志——
+                    # 若任其抛出会落回下方 stream_error 捕获 → deadline 路径双记账。
+                    self._close_quietly(gen)
                     yield StreamChunk(
                         done=True,
                         finish_reason="length",
@@ -182,9 +195,17 @@ class StreamRunner:
                     tcs = chunk.tool_calls
                 elif chunk.text:
                     parts.append(chunk.text)
+                    emitted_content = True
                     yield chunk
         except Exception as exc:
             h._circuit.record_failure(target.provider)
+            if not emitted_content and not isinstance(exc, TerminalError):
+                # 首个内容块之前的中流错误(如 Anthropic message_start 计量块之后
+                # SSE 断连):未向客户端发过任何字节,回退是安全的——按 retriable
+                # 记 attempt 并回退下一目标,而非 GatewayError→400 白白放弃。
+                ctx.attempts.append(h._attempt(target, "retriable", t0, str(exc)))
+                self._close_quietly(gen)
+                return False
             ctx.attempts.append(h._attempt(target, "stream_error", t0, str(exc)))
             self._capture(
                 ctx,
@@ -199,6 +220,7 @@ class StreamRunner:
                 "stream",
                 error_message=str(exc),
             )
+            self._close_quietly(gen)  # 中途错也不留半开 provider 流
             raise GatewayError(str(exc)) from exc
         except BaseException:
             ctx.attempts.append(
@@ -216,6 +238,7 @@ class StreamRunner:
                 "aborted",
                 "client_abort",
             )
+            self._close_quietly(gen)  # 客户端断流:显式关闭而非等 GC
             raise
         h._circuit.record_success(target.provider)
         ctx.attempts.append(h._attempt(target, "success", t0, None))
@@ -235,6 +258,15 @@ class StreamRunner:
             tool_calls=tcs,
         )
         return True
+
+    @staticmethod
+    def _close_quietly(gen) -> None:
+        """显式关闭 provider 流,close 阶段的异常只记日志——不得让清理失败
+        触发第二次记账/改变主路径语义(如 deadline 已捕获后再落一条 stream 错误)。"""
+        try:
+            gen.close()
+        except Exception as exc:
+            log.warning("provider stream close failed (ignored): %s", exc)
 
     @staticmethod
     def _chunks_of(resp: NormalizedResponse) -> Iterator[StreamChunk]:

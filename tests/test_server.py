@@ -864,28 +864,39 @@ def test_openai_server_to_anthropic_backend_end_to_end():
     assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "f"
 
 
-def test_image_url_message_returns_400():
-    """P2-9 端到端:视觉输入不支持 → 显式 400,而非静默丢图。"""
+def _anthropic_gateway(create_fn):
     from agent_ctl.config import RetryConfig
     from agent_ctl.core.cost import CostMeter
     from agent_ctl.core.gateway import Gateway
     from agent_ctl.core.router import Router
     from agent_ctl.providers.anthropic_provider import AnthropicProvider
 
-    class _Messages:
-        def create(self, **kwargs):
-            raise AssertionError("不应打到 provider")
-
-    gw = Gateway(
+    messages_api = type("M", (), {"create": staticmethod(create_fn)})()
+    return Gateway(
         router=Router({"m": ["anthropic/claude-x"]}),
         providers={
-            "anthropic": AnthropicProvider(type("C", (), {"messages": _Messages()})())
+            "anthropic": AnthropicProvider(type("C", (), {"messages": messages_api})())
         },
         cost_meter=CostMeter({}),
         store=None,
         retry=RetryConfig(max_attempts_per_target=1, base_backoff_s=0.0, timeout_s=5.0),
     )
-    c = TestClient(build_server(gw, now=lambda: 1))
+
+
+def test_image_url_message_converted_and_forwarded():
+    """P1-c 端到端:image_url 不再 400——翻成 Anthropic image 块直通后端。"""
+    captured = {}
+
+    class _Msg:
+        content = [type("B", (), {"type": "text", "text": "看到了"})()]
+        stop_reason = "end_turn"
+        usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _Msg()
+
+    c = TestClient(build_server(_anthropic_gateway(create), now=lambda: 1))
     r = c.post(
         "/v1/chat/completions",
         json={
@@ -901,8 +912,53 @@ def test_image_url_message_returns_400():
             ],
         },
     )
+    assert r.status_code == 200
+    assert captured["messages"][0]["content"][1] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://x/1.png"},
+    }
+
+
+def test_input_audio_message_returns_400_without_reaching_provider():
+    """P1-b 端到端:本地拒绝在 HTTP 边界 400,不打 provider(更不污染熔断)。"""
+
+    def create(**kwargs):
+        raise AssertionError("不应打到 provider")
+
+    c = TestClient(build_server(_anthropic_gateway(create), now=lambda: 1))
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_audio", "input_audio": {}}],
+                }
+            ],
+        },
+    )
     assert r.status_code == 400
-    assert "image_url" in r.json()["error"]["message"]
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    assert "input_audio" in r.json()["error"]["message"]
+
+
+def test_unknown_tool_choice_string_returns_400():
+    def create(**kwargs):
+        raise AssertionError("不应打到 provider")
+
+    c = TestClient(build_server(_anthropic_gateway(create), now=lambda: 1))
+    r = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "tool_choice": "weird",
+        },
+    )
+    assert r.status_code == 400
+    assert "tool_choice" in r.json()["error"]["message"]
 
 
 def test_sse_generator_close_closes_gateway_stream():

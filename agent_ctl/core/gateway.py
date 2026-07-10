@@ -32,6 +32,7 @@ from agent_ctl.models import (
     Target,
 )
 from agent_ctl.providers.base import Provider
+from agent_ctl.providers.tooltrans import validate_local_content
 
 log = logging.getLogger("agent_ctl.gateway")
 
@@ -173,6 +174,29 @@ class Gateway:
     def invoke(self, request: NormalizedRequest) -> NormalizedResponse:
         started = time.monotonic()
         meta = request.metadata or {}
+        # 本地可判定的终态校验(多模态/tool_choice):在进任何 provider 路径前拒绝。
+        # 若留到 provider 翻译层抛,会被记成 provider 失败计入熔断——5 个坏请求
+        # 就能把健康 provider 的熔断打开(HTTP 边界另有一道,库形态调用走这里)。
+        try:
+            validate_local_content(request.messages, request.tool_choice)
+        except TerminalError as exc:
+            self._capturer.record(
+                request,
+                meta,
+                started,
+                model_resolved=None,
+                attempts=[],
+                resp=None,
+                status="error",
+                cache_hit=False,
+                cache_key=None,
+                error_type="validation",
+                error_message=str(exc),
+            )
+            self._capturer.log(
+                request, meta, "error", None, "validation", False, started
+            )
+            raise
         cache_key = self._cache_key_for(request)
 
         if cache_key:

@@ -4,10 +4,14 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, NonNegativeFloat
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, ValidationError
 
 
 class RetryConfig(BaseModel):
+    # 未知键 fail-fast:拼错的调优键(如 max_attempt_per_target)若被静默忽略走默认值,
+    # 比报错危险得多——用户以为改了策略,实际没生效。
+    model_config = ConfigDict(extra="forbid")
+
     max_attempts_per_target: int = Field(default=2, ge=1)
     base_backoff_s: float = Field(default=0.2, ge=0.0)
     timeout_s: float = Field(default=60.0, gt=0.0)
@@ -15,6 +19,7 @@ class RetryConfig(BaseModel):
 
 
 class Config(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # 未知键 fail-fast(同 RetryConfig)
     routes: dict[str, list[str]] = {"default": ["anthropic/claude-sonnet-4-6"]}
     # 裸模型名 → "provider/model"(OpenAI 兼容 server 用,如 deepseek-chat→deepseek/deepseek-chat)
     model_aliases: dict[str, str] = {}
@@ -49,7 +54,20 @@ def load_config(path: str | None = None) -> Config:
     if candidate:
         with open(candidate, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
-    cfg = Config(**data)
+    try:
+        cfg = Config(**data)
+    except ValidationError as exc:
+        unknown = [
+            ".".join(str(p) for p in err["loc"])
+            for err in exc.errors()
+            if err["type"] == "extra_forbidden"
+        ]
+        if unknown:
+            raise ValueError(
+                f"配置文件 {candidate or '(默认)'} 包含未知键: {', '.join(unknown)}"
+                "(检查拼写;用 `agent-ctl config-schema` 查看全部合法键)"
+            ) from exc
+        raise
     if env_profile := os.getenv("AGENT_CTL_PROFILE"):
         cfg = cfg.model_copy(update={"profile": env_profile})
     return cfg

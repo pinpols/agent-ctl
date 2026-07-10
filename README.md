@@ -127,6 +127,7 @@ Captures are stored in SQLite at `db_path`. The store initializes schema metadat
 - Keep `serve` bound to `127.0.0.1` unless an auth token and network controls are in place.
 - Use `--metrics-token` when Prometheus should scrape with a separate credential.
 - Use `--trust-proxy-headers` only behind a trusted reverse proxy that sets `X-Forwarded-For`; by default only local proxies are trusted, and `--trusted-proxy-cidr` allows specific non-local proxy source IPs.
+  - Keep the trusted CIDRs as narrow as possible — list only the real reverse-proxy source IPs (e.g. `10.0.0.5/32`), never a whole subnet your clients also live in. The rate limiter walks the `X-Forwarded-For` chain right-to-left and keys on the first *untrusted* hop; if an over-broad CIDR makes the entire chain trusted, it falls back to the socket peer (the proxy itself), so **all clients behind that proxy share a single rate-limit bucket** — one noisy client can then exhaust the shared limit for everyone.
 - Tool-call responses are not cached by default because they often depend on external state.
 - Retries use exponential backoff with jitter to avoid synchronized retry bursts.
 - Docker builds use a fully resolved runtime `constraints.txt`; refresh it deliberately with `uv pip compile pyproject.toml --extra server --extra anthropic --extra openai --no-header --no-annotate` when upgrading dependencies.
