@@ -339,6 +339,47 @@ def test_serve_models_include_routes_and_aliases(tmp_path, monkeypatch):
     assert ids == {"default", "alias-a"}
 
 
+def test_serve_fails_friendly_on_bad_default_max_tokens_env(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setenv("AGENT_CTL_DEFAULT_MAX_TOKENS", "bad")
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(
+            routes={"default": ["fake/a"]},
+            db_path=str(tmp_path / "c.db"),
+        ),
+    )
+    def boom():
+        raise AssertionError("provider setup should not be reached")
+
+    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", boom)
+
+    assert main(["serve"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "AGENT_CTL_DEFAULT_MAX_TOKENS" in out
+
+
+def test_serve_fails_friendly_on_bad_trusted_proxy_cidr(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_ctl.cli.load_config",
+        lambda path=None: Config(db_path=str(tmp_path / "c.db")),
+    )
+
+    def boom():
+        raise AssertionError("provider setup should not be reached")
+
+    monkeypatch.setattr("agent_ctl.providers.catalog.available_providers", boom)
+
+    assert main(["serve", "--trusted-proxy-cidr", "not-a-cidr"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "trusted-proxy-cidr" in out
+
+
 def test_cli_fails_friendly_on_unknown_config_key(tmp_path, capsys):
     """P2-b:doctor 等命令对拼错的配置键给 FAIL 提示 + 退出码 1,非裸 traceback。"""
     from agent_ctl.cli import main

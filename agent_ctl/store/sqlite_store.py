@@ -186,8 +186,10 @@ class SqliteCaptureStore:
             for row in rows:
                 yield CallRecord(**json.loads(row["doc"]))
             return
-        conn = sqlite3.connect(self._path)
+        uri = f"{Path(self._path).resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             for row in conn.execute(sql, params):  # 游标惰性取,真流式
                 yield CallRecord(**json.loads(row["doc"]))

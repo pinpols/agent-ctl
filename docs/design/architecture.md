@@ -68,14 +68,14 @@ server 是对外主形态;库形态供同进程嵌入。两者共用同一个 `G
 
 ## 5. Runner 架构与决策
 
-`Gateway(StreamRunnerMixin, EmbeddingRunnerMixin)` —— 三条执行路径(invoke 内联 / stream / embed
-mixin)**共享** Gateway 的守卫(deadline/circuit)、`_invoke_target`、`Capturer`、`Router`、状态。
-守卫抽成单一真相源(此前 deadline/circuit 判断散布多处导致同类 bug 要多处修)。
+`Gateway` 内联非流式 `invoke`,并把 `stream` / `embed` 委派给 `StreamRunner` /
+`EmbeddingRunner` 协作者。三条执行路径**共享** Gateway 的守卫(deadline/circuit)、
+`_invoke_target`、`Capturer`、`Router`、状态。守卫抽成单一真相源(此前
+deadline/circuit 判断散布多处导致同类 bug 要多处修)。
 
-**已知取舍**(深审指出,见 ADR-0002):mixin 直接访问 `self._budget/_circuit/...`,带
-`# mypy: disable-error-code=attr-defined`——是"文件级提取"而非可独立实例化的真解耦,
-mypy 沉默掩盖了潜在类型错误。**复评触发**:出现第 3 条执行路径,或 mixin 共享的私有 API
-面继续膨胀时,改为协作者/策略对象。当前规模(三个小文件)下可维护。
+**已知取舍**(见 ADR-0002):runner 仍通过 `RunnerHost` 访问 Gateway 的治理面,不是完全
+独立的 domain service。当前规模下可维护;复评触发是出现第 4 条执行路径,或 `RunnerHost`
+协议继续膨胀。
 
 ## 6. 数据模型(`models.py`)
 

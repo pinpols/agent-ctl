@@ -329,7 +329,13 @@ def build_server(
     from fastapi import FastAPI
 
     if default_max_tokens is None:
-        default_max_tokens = int(os.getenv("AGENT_CTL_DEFAULT_MAX_TOKENS", "1024"))
+        raw_default = os.getenv("AGENT_CTL_DEFAULT_MAX_TOKENS", "1024")
+        try:
+            default_max_tokens = int(raw_default)
+        except ValueError as exc:
+            raise ValueError(
+                "AGENT_CTL_DEFAULT_MAX_TOKENS must be a positive integer"
+            ) from exc
     if default_max_tokens <= 0:
         raise ValueError("default_max_tokens must be a positive integer")
     clock = now or (lambda: int(time.time()))

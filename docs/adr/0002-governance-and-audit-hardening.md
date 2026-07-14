@@ -12,14 +12,14 @@ ADR-0001 之后,系统经过 3 轮代码审核(挖修 F1–F6 / G1–G5 / H1–H
 
 ## 决策
 
-### D1 执行路径拆为 mixin + 共享守卫 + Capturer 协作者
+### D1 执行路径拆为协作者 + 共享守卫 + Capturer 协作者
 `invoke`/`invoke_stream`/`embed` 此前各自重抄"路由→deadline→熔断→捕获"骨架,导致同类
 修复要在多 runner 重复改。整改:抽 `_deadline_exceeded`/`_circuit_blocked` 守卫为单一真相源;
 把"成本/预算/指标/脱敏落库/日志"抽到 `Capturer` 协作者;`invoke_stream`/`embed` 落入
-`StreamRunnerMixin`/`EmbeddingRunnerMixin`(`Gateway` 多继承)。
-**已知取舍**:mixin 直接访问 `Gateway` 私有成员、带 `# mypy: disable=attr-defined`——是
-文件级提取而非可独立测试的真解耦,mypy 沉默掩盖潜在类型错误(深审 A1)。**复评触发**:
-出现第 3 条执行路径,或共享私有 API 面继续膨胀时,改协作者/策略对象。
+`StreamRunner`/`EmbeddingRunner` 协作者,由 `Gateway` 注入自身作为 `RunnerHost`。
+**已知取舍**:runner 仍调用 host 的治理私有面,但不再通过 mixin 多继承和文件级
+`attr-defined` 关闭掩盖类型错误。**复评触发**:出现第 4 条执行路径,或 `RunnerHost`
+协议继续膨胀时,把共享治理面收敛为更窄的公开协作者接口。
 
 ### D2 流式 deadline 与中途语义
 - **开流后 deadline 也生效**:此前 deadline 只约束开流前,长流/卡顿流可无视预算跑满。
@@ -57,9 +57,8 @@ SQLite(深审复核:raw 本就未落库,此为显式确认而非新改)。
 承 ADR-0001 的非目标外,深审确认以下仍开口,按对采用的杀伤力排:
 1. **预算持久化(扛重启)** —— "拦得住超支"叙事的最大缺口;最小动作=预算落 SQLite + 滚动窗。
 2. **per-token consumer 身份** —— 当前 `user` 可伪造,多人共用即治理崩。
-3. **`CaptureStore` Protocol 与实现对齐** —— 当前 Protocol 签名过时、缺 `iter_all`,PgStore 插入无法类型校验。
-4. **真 provider 契约进 CI** —— provider 解析全打 fake SDK;nightly 无 key 时 skip-to-green。建议用真实录制样本作 fixture + 无 provider 跑时显式告警而非绿。
-5. **双翻译复评条件已触发**(OpenAI 兼容是对外主形态)—— 暂以工具调用往返契约测试守正确性,不翻转 canonical。
+3. **真 provider 契约进 CI** —— provider 解析全打 fake SDK;nightly 无 key 时 skip-to-green。建议用真实录制样本作 fixture + 无 provider 跑时显式告警而非绿。
+4. **双翻译复评条件已触发**(OpenAI 兼容是对外主形态)—— 暂以工具调用往返契约测试守正确性,不翻转 canonical。
 
 ## 影响
 

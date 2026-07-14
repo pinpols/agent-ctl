@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+from ipaddress import ip_network
 
 from agent_ctl import __version__
 from agent_ctl.config import load_config
@@ -171,6 +173,12 @@ def _cmd_serve(cfg, args) -> int:
     ):
         print("FAIL: non-local serve requires a non-default --api-token")
         return 1
+    try:
+        default_max_tokens = _resolve_default_max_tokens(args.default_max_tokens)
+        trusted_proxy_cidrs = _validate_trusted_proxy_cidrs(args.trusted_proxy_cidr)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     avail = available_providers()
     if not avail:
         print(
@@ -194,18 +202,22 @@ def _cmd_serve(cfg, args) -> int:
         request_deadline_s=cfg.request_deadline_s,
         budget=BudgetGuard(cfg.budgets, cfg.budget_global),
     )
-    app = build_server(
-        gateway,
-        models=sorted({*cfg.routes, *cfg.model_aliases}) or avail,
-        api_token=args.api_token,
-        metrics_token=args.metrics_token,
-        max_request_bytes=args.max_request_bytes,
-        rate_limit_per_minute=args.rate_limit_per_minute,
-        trust_proxy_headers=args.trust_proxy_headers,
-        trusted_proxy_cidrs=args.trusted_proxy_cidr,
-        allow_direct_models=cfg.allow_direct_models,
-        default_max_tokens=args.default_max_tokens,
-    )
+    try:
+        app = build_server(
+            gateway,
+            models=sorted({*cfg.routes, *cfg.model_aliases}) or avail,
+            api_token=args.api_token,
+            metrics_token=args.metrics_token,
+            max_request_bytes=args.max_request_bytes,
+            rate_limit_per_minute=args.rate_limit_per_minute,
+            trust_proxy_headers=args.trust_proxy_headers,
+            trusted_proxy_cidrs=trusted_proxy_cidrs,
+            allow_direct_models=cfg.allow_direct_models,
+            default_max_tokens=default_max_tokens,
+        )
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
@@ -229,6 +241,30 @@ def _parse_since(value: str | None) -> float | None:
         raise SystemExit(
             f"FAIL: 非法 --since 值 {value!r}(期望 Unix 时间戳、Nh 或 Nd,如 24h / 7d)"
         ) from None
+
+
+def _resolve_default_max_tokens(value: int | None) -> int:
+    source = "--default-max-tokens"
+    raw: int | str | None = value
+    if raw is None:
+        source = "AGENT_CTL_DEFAULT_MAX_TOKENS"
+        raw = os.getenv(source, "1024")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{source} must be a positive integer")
+    return parsed
+
+
+def _validate_trusted_proxy_cidrs(values: list[str] | None) -> list[str] | None:
+    for value in values or []:
+        try:
+            ip_network(value, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"invalid --trusted-proxy-cidr {value!r}") from exc
+    return values
 
 
 def _price_exists(cfg, target: Target) -> bool:

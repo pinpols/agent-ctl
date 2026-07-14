@@ -27,3 +27,18 @@ jobs:
       - name: Pytest
         # 覆盖率棘轮:当前 ~92%,门槛设 90 只防回退、不卡现状;升上去后可逐步抬高。
         run: python -m pytest -q --cov=agent_ctl --cov-report=term-missing --cov-fail-under=90
+
+  production-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime extras with production constraints
+        run: python -m pip install -c constraints.txt ".[server,anthropic,openai]"
+      - name: Smoke installed CLI
+        run: agent-ctl version
+      - name: Validate compose template
+        run: AGENT_CTL_API_TOKEN=dummy docker compose config >/tmp/agent-ctl-compose.yml

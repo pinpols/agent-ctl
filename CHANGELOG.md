@@ -16,6 +16,7 @@ The project follows semantic versioning for public CLI/API behavior:
 - Added trusted proxy CIDR filtering for `X-Forwarded-For` handling; proxy headers now default to local-only trust.
 - Updated prod `doctor` alias price checks to respect currently available providers, with `--strict-alias-prices` for shared config validation.
 - Expanded `constraints.txt` to a fully resolved runtime dependency constraints file.
+- Hardened async capture shutdown, SQLite export read connections, production install CI, and architecture documentation.
 
 ## [0.1.0] - 2026-06-25
 

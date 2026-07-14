@@ -3,7 +3,7 @@ import threading
 import time
 
 from agent_ctl.models import CallRecord
-from agent_ctl.store.async_store import AsyncCaptureStore
+from agent_ctl.store.async_store import AsyncCaptureStore, _STOP
 from agent_ctl.store.sqlite_store import SqliteCaptureStore
 
 
@@ -98,6 +98,43 @@ def test_close_skips_inner_close_while_worker_draining():
     store.close(timeout=0.2)  # join 超时 → worker 仍 alive
     assert inner.closed is False  # 未在 worker 仍活时关内层
     gate.set()  # 放行收尾
+
+
+def test_close_does_not_block_when_queue_full_and_worker_stuck():
+    """关闭时队列满 + worker 卡住时,close timeout 仍应生效。"""
+    gate = threading.Event()
+
+    class BlockingInner:
+        def __init__(self):
+            self.started = threading.Event()
+            self.saved = 0
+            self.closed = False
+
+        def save(self, record):
+            self.started.set()
+            gate.wait()
+            self.saved += 1
+
+        def close(self):
+            self.closed = True
+
+    inner = BlockingInner()
+    store = AsyncCaptureStore(inner, max_queue=1)
+    store.save(_rec(0))
+    assert inner.started.wait(timeout=1)
+    store.save(_rec(1))  # worker 被第一条卡住,队列容量 1 被第二条填满
+
+    start = time.monotonic()
+    store.close(timeout=0.01)
+    assert time.monotonic() - start < 0.2
+    assert inner.closed is False
+
+    gate.set()
+    deadline = time.monotonic() + 1
+    while inner.saved < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    store._q.put(_STOP)
+    store._thread.join(timeout=1)
 
 
 def test_close_is_idempotent_and_save_after_close_drops(tmp_path):

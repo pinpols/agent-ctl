@@ -94,7 +94,15 @@ class AsyncCaptureStore:
         if self._closed:
             return
         self._closed = True
-        self._q.put(_STOP)
+        try:
+            self._q.put(_STOP, timeout=timeout)
+        except queue.Full:
+            log.warning(
+                "capture queue still full at close after %.1fs; "
+                "skip blocking shutdown and leave daemon worker to drain",
+                timeout,
+            )
+            return
         self._thread.join(timeout=timeout)
         if not self._thread.is_alive():
             self._inner.close()
