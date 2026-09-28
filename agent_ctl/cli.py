@@ -241,8 +241,6 @@ def _parse_since(value: str | None) -> float | None:
         raise SystemExit(
             f"FAIL: 非法 --since 值 {value!r}(期望 Unix 时间戳、Nh 或 Nd,如 24h / 7d)"
         ) from None
-
-
 def _resolve_default_max_tokens(value: int | None) -> int:
     source = "--default-max-tokens"
     raw: int | str | None = value

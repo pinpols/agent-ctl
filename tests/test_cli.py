@@ -338,7 +338,6 @@ def test_serve_models_include_routes_and_aliases(tmp_path, monkeypatch):
     ids = {m["id"] for m in seen["models"]["data"]}
     assert ids == {"default", "alias-a"}
 
-
 def test_serve_fails_friendly_on_bad_default_max_tokens_env(
     tmp_path, capsys, monkeypatch
 ):
@@ -350,6 +349,7 @@ def test_serve_fails_friendly_on_bad_default_max_tokens_env(
             db_path=str(tmp_path / "c.db"),
         ),
     )
+
     def boom():
         raise AssertionError("provider setup should not be reached")
 
