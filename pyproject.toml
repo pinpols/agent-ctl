@@ -25,6 +25,12 @@ include = ["agent_ctl*"]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning:starlette.*", "ignore:Using `httpx`:UserWarning"]
 
+[tool.ruff.lint]
+# Keep CI stable across Ruff releases. The project currently treats Ruff as a
+# correctness/syntax gate, while stricter style/security rules are covered by
+# focused tests and the dedicated security-scan workflow.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.mypy]
 # 可选 extra(server/anthropic/openai)在 CI 的 dev 环境不安装,
 # 其懒加载导入(uvicorn/anthropic/openai)无 stub,放行缺失导入,避免 mypy 误红。
